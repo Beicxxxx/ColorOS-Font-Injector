@@ -32,12 +32,41 @@ Because `inotifyd` on the parent directory can catch read events with sub-millis
 
 ---
 
-## 2. Prerequisites
+## 2. Prerequisites & Critical Constraints
 
-1. **Target Device**: ColorOS 15 or 16 (Android 15/16), OnePlus / OPPO / Realme.
-2. **Access Method**: ADB (USB or wireless debugging) OR on-device Shizuku (uid=2000).
-3. **Theme Store DIY Record**: The phone must have at least one DIY font generated or downloaded in Theme Store (`我的` -> `我的资源` -> `字体` -> `DIY 字体` or `樱落粗黑体`).
-4. **Font UPEM**: ColorOS font renderer expects `unitsPerEm = 256` for DIY fonts. Fonts with 1000 or 2048 UPEM should be scaled to 256 using `scripts/scale_upem.py`.
+### 2.1 Target Device & System
+- **Supported Brands**: OnePlus, OPPO, Realme.
+- **OS Version**: ColorOS 15 or 16 (Android 15 or 16).
+- **Security State**: **No root required, locked bootloader compatible** (Green launch verify status).
+
+### 2.2 Critical Prerequisite: Theme Store DIY Font (Mandatory)
+> **Why is a DIY font required?**
+> Standard fonts downloaded from Theme Store are saved in private app data (`/data/data/com.heytap.themestore/`) or system caches, inaccessible without root.
+> In contrast, **DIY Fonts** (`colorFonts`) are uncompressed into the shared external storage path:
+> `/sdcard/Android/data/com.heytap.themestore/files/Themes/.data/temp/<uuid>/colorFonts/`
+> This path carries `ext_data_rw` permissions, granting `shell (uid=2000)` read, write, rename, and inotify monitoring capabilities.
+> When "应用" (Apply) is pressed, `com.oplus.uxdesign` copies from this directory into `/data/format_unclear/font/Customized-Regular.ttf`.
+
+**Preparation Steps (One-time only)**:
+1. Open Theme Store (`com.heytap.themestore`).
+2. Search and acquire any font supporting **"可 DIY" / "彩色字体"** (e.g. "樱落粗黑体" or other customizable fonts).
+3. Click "开始 DIY" (Customize), make a minor tweak or simply click "完成" / "保存" to create at least one history record.
+4. Open "历史 DIY 记录" (History records) and confirm the card exists. The template file `/sdcard/Android/data/com.heytap.themestore/files/Themes/.data/temp/<uuid>/colorFonts/<uuid>_colorFont_<timestamp>.ttf` is now generated.
+
+### 2.3 Access Method
+- **Method A (ADB)**: Wireless or USB Debugging connected (`adb devices` shows device).
+- **Method B (On-device Shizuku)**: Shizuku active with `uid=2000` shell permission granted.
+
+### 2.4 Font Format & UPEM Specifications
+- Standard TrueType font (`.ttf`) with valid Unicode / CJK mappings.
+- **UPEM Standard**: ColorOS DIY font module expects `unitsPerEm = 256`.
+  - Typical fonts use 1000 or 2048 UPEM.
+  - While many fonts render, high UPEM can cause minor vertical alignment discrepancies in some text input fields.
+  - Scale to 256 using `scripts/scale_upem.py input.ttf output.ttf 256` before injection.
+
+### 2.5 Persistence & Precautions
+- Injected font at `/data/format_unclear/font/Customized-Regular.ttf` survives device reboots and OTA updates.
+- Avoid clicking "应用" on DIY fonts inside Theme Store without the injector active, as this restores the default template font.
 
 ---
 

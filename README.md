@@ -43,19 +43,61 @@
 
 ---
 
+## ⚠️ 核心前置条件与原理限制（必读）
+
+本项目之所以能实现“免 Root 替换系统全局界面字体”，依赖于 ColorOS 特定系统链路的权限组合。在开始前，**必须满足以下所有前提条件**：
+
+### 1. 设备与系统兼容性
+* **支持品牌**：一加 (OnePlus)、OPPO、真我 (Realme) 全系手机及平板。
+* **系统版本**：ColorOS 15 或 ColorOS 16（基于 Android 15 / 16）。
+* **系统安全状态**：**无需 Root**，**无需解锁 Bootloader**（保持官方 Locked、Green 启动校验状态完全兼容）。
+
+### 2. 关键前提：必须在主题商店拥有至少一款“可 DIY”的字体
+> 📌 **为什么普通字体不行？**
+> * 主题商店中普通商业字体的下载与应用链路完全封闭在私有内部目录（`/data/data/com.heytap.themestore/`）及系统加密缓存中，非 Root 的 Shell 权限根本无法读写；
+> * **唯独“DIY 字体”具有特殊的开放架构**：为了支持用户在本地调整字重、贴图和预览，主题商店会将 DIY 字体的实际文件解压到公共外部存储空间：
+>   `/sdcard/Android/data/com.heytap.themestore/files/Themes/.data/temp/<uuid>/colorFonts/`
+>   该路径带有 `ext_data_rw` 权限标签，无论是通过 ADB 还是 Shizuku，`shell (uid=2000)` 对其拥有**毫秒级读写、重命名以及 Inotify 文件事件监听**的完整控制权！
+> * 当你点击应用时，高权限的系统服务（`com.oplus.uxdesign`，uid 10232）会从这个临时目录中读取字体文件，并由系统底层直接写入受 SELinux 保护的系统字体目录（`/data/format_unclear/font/Customized-Regular.ttf`）。
+
+#### 准备操作（只需操作一次）：
+1. 打开系统自带的 **「主题商店」**（`com.heytap.themestore`）；
+2. 搜索并获取任意一款带有 **「可 DIY」** 或 **「彩色字体」** 标签的字体（如官方常见的“樱落粗黑体”或其它支持 DIY 样式的字体）；
+3. 点击进入字体详情页，点击下方的 **「开始 DIY」**；
+4. 随意调整一下粗细或直接点击 **「保存」**，生成至少一条历史 DIY 记录；
+5. 进入该字体的 **「历史 DIY 记录」** 界面，确保能看到生成的历史记录卡片。此时外部存储中已生成了对应的 `colorFonts/<uuid>_colorFont_<时间戳>.ttf` 模板文件，后续所有注入都将以此为跳板。
+
+### 3. Shell 调试权限接入（二选一）
+* **方案 A（手机端脱机使用 App）**：手机安装并激活 **[Shizuku](https://shizuku.rikka.app/)**。
+  * 打开手机「设置」->「关于本机」-> 连击版本号开启「开发者选项」；
+  * 进入「开发者选项」-> 开启「无线调试」；
+  * 在 Shizuku 中点击配对并启动服务即可（纯手机端完成，无需连接电脑）。
+* **方案 B（电脑端 / AI Agent 自动化执行）**：
+  * 开启「开发者选项」中的「USB 调试」或「无线调试」；
+  * 电脑通过 ADB 正常连接手机（终端运行 `adb devices` 能看到设备在线）。
+
+### 4. 待注入字体的格式规范
+* **文件格式**：必须为标准 TrueType 字体（`.ttf`），具备常规 Unicode / CJK 字符集映射。
+* **UPEM (unitsPerEm) 建议**：ColorOS 的 DIY 字体模块采用 **256 UPEM**。
+  * 现代开源或商用字体（如思源、苹方、霞鹜等）通常采用 1000 或 2048 UPEM；
+  * 虽然部分应用可直接显示高 UPEM 字体，但可能在某些旧版应用文本框内出现垂直居中微小偏差；
+  * **建议**：使用项目内置脚本 `scale_upem.py`（`python scale_upem.py input.ttf output.ttf 256`）进行无损缩放后再注入。
+
+### 5. 注入后效果与注意事项
+* **持久性**：替换成功后，系统字体写入在 `/data/format_unclear/font/Customized-Regular.ttf`，**手机重启、关机、系统 OTA 增量更新均不会失效**。
+* **恢复与防误触**：只要不在主题商店中随意点击其他未被劫持的字体，新字体就会一直生效。若在主题商店内再次点击了官方字体，系统字体会被覆盖恢复；此时只需重新运行一次 App 或脚本注入即可。
+
+---
+
 ## 📱 一、手机端 App 使用指南
 
-### 前置要求
-1. 手机已安装并激活 [Shizuku](https://shizuku.rikka.app/)（通过无线调试一键启动，无需 Root）。
-2. 主题商店中已有至少一条 DIY 字体记录（在主题商店搜索“DIY”或“樱落粗黑体”，生成过一次即可）。
-
 ### 使用步骤
-1. 下载并安装本项目的 Release APK（`ColorOS 字体注入器.apk`）。
-2. 打开 App，授予 Shizuku 权限（Shell UID=2000）。
+1. 前往 [Releases](https://github.com/Beicxxxx/ColorOS-Font-Injector/releases) 下载并安装本项目的 APK（`ColorOS-Font-Injector-v1.0.0.apk`）。
+2. 打开 App，点击「请求 Shizuku 授权」，授予 Shell 权限。
 3. 点击 **「选择字体 (.ttf)」**，选取你准备好的字体文件。
-   * App 会自动读取 TTF `head` 表检测 `unitsPerEm`。ColorOS DIY 字体建议为 256 UPEM（可使用项目内置脚本一键缩放）。
+   * App 会自动读取 TTF `head` 表检测 `unitsPerEm`，并显示文件大小和 MD5。
 4. 点击 **「一键注入并应用字体」**。
-5. 注入完成后，系统字体立即生效！**支持重启设备与系统 OTA 升级，效果永久保留**。
+5. App 将在后台启动精确 Inode 监听并自动处理替换；完成后弹窗提示成功，系统全局字体即刻刷新生效！
 
 ---
 
