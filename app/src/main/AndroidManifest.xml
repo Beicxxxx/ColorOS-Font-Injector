@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Android 11+ 包可见性：声明后才能用 getLaunchIntentForPackage 打开这些 App -->
+    <queries>
+        <package android:name="com.heytap.themestore" />
+        <package android:name="com.oplus.themestore" />
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+
 
     <application
         android:name=".App"
