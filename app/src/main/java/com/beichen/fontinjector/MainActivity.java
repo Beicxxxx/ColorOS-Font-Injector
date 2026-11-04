@@ -116,6 +116,29 @@ public class MainActivity extends AppCompatActivity {
         Shizuku.removeBinderDeadListener(binderDeadListener);
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // If an injection finished while this app was in the background (or was
+        // killed by ColorOS and relaunched), surface its result now. The script
+        // runs under shizuku_server and completes independently of this app.
+        executor.execute(() -> {
+            try {
+                if (!Shizuku.pingBinder() || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) return;
+                String r = runShizukuShell("cat /data/local/tmp/app_inject_result.txt 2>/dev/null").trim();
+                if (r.startsWith("SUCCESS") || r.startsWith("FAILED")) {
+                    runShizukuShell("rm -f /data/local/tmp/app_inject_result.txt");
+                    final boolean ok = r.startsWith("SUCCESS");
+                    mainHandler.post(() -> {
+                        btnInjectApply.setEnabled(cachedFontFile != null);
+                        refreshSystemFontInfo();
+                        Toast.makeText(MainActivity.this, ok ? "注入已完成 ✅" : "注入未成功，请重试", Toast.LENGTH_LONG).show();
+                    });
+                }
+            } catch (Exception ignored) {}
+        });
+    }
+
     private void log(String msg) {
         mainHandler.post(() -> {
             tvLogs.append(msg + "\n");
@@ -311,61 +334,6 @@ public class MainActivity extends AppCompatActivity {
         return output.toString();
     }
 
-    // Center (x,y) of the newest DIY record's "应用" button. The newest
-    // colorFont file (ls -t) is the top-most / left-most card, so return the
-    // first "应用" button in reading order.
-    private int[] findApplyButtonXY() {
-        try {
-            String xml = runShizukuShell("uiautomator dump /data/local/tmp/uidump.xml >/dev/null 2>&1; cat /data/local/tmp/uidump.xml");
-            java.util.regex.Matcher nm = java.util.regex.Pattern.compile("<node\\b[^>]*?>").matcher(xml);
-            java.util.regex.Pattern useId = java.util.regex.Pattern.compile("resource-id=\"[^\"]*/use\"");
-            java.util.regex.Pattern bounds = java.util.regex.Pattern.compile("bounds=\"\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]\"");
-            java.util.List<int[]> btns = new java.util.ArrayList<>();
-            while (nm.find()) {
-                String s = nm.group();
-                if (s.contains("content-desc=\"应用\"") || useId.matcher(s).find()) {
-                    java.util.regex.Matcher bm = bounds.matcher(s);
-                    if (bm.find()) {
-                        int x1 = Integer.parseInt(bm.group(1)), y1 = Integer.parseInt(bm.group(2));
-                        int x2 = Integer.parseInt(bm.group(3)), y2 = Integer.parseInt(bm.group(4));
-                        btns.add(new int[]{(x1 + x2) / 2, (y1 + y2) / 2});
-                    }
-                }
-            }
-            if (btns.isEmpty()) return null;
-            btns.sort((a, b) -> a[1] != b[1] ? a[1] - b[1] : a[0] - b[0]);
-            return btns.get(0);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    // Bring the "历史 DIY 记录" page to the foreground, dismissing a leftover
-    // "-15 资源包已损坏" dialog or the apply-success H5 page.
-    private void ensureHistoryPage() {
-        for (int i = 0; i < 4; i++) {
-            String xml = runShizukuShell("uiautomator dump /data/local/tmp/uidump.xml >/dev/null 2>&1; cat /data/local/tmp/uidump.xml");
-            java.util.regex.Matcher nm = java.util.regex.Pattern.compile("<node\\b[^>]*?>").matcher(xml);
-            java.util.regex.Pattern bounds = java.util.regex.Pattern.compile("bounds=\"\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]\"");
-            while (nm.find()) {
-                String s = nm.group();
-                if (s.contains("text=\"知道了\"")) {
-                    java.util.regex.Matcher bm = bounds.matcher(s);
-                    if (bm.find()) {
-                        int x1 = Integer.parseInt(bm.group(1)), y1 = Integer.parseInt(bm.group(2));
-                        int x2 = Integer.parseInt(bm.group(3)), y2 = Integer.parseInt(bm.group(4));
-                        runShizukuShell("input tap " + ((x1 + x2) / 2) + " " + ((y1 + y2) / 2));
-                    }
-                    break;
-                }
-            }
-            String fg = runShizukuShell("dumpsys activity activities | grep topResumedActivity | head -1");
-            if (fg.contains("DiyFontHistoryActivity")) return;
-            runShizukuShell("input keyevent 4");
-            try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
-        }
-    }
-
     private void executeInjection() {
         if (cachedFontFile == null || !cachedFontFile.exists()) {
             Toast.makeText(this, "请先选择字体文件", Toast.LENGTH_SHORT).show();
@@ -416,72 +384,100 @@ public class MainActivity extends AppCompatActivity {
                 String targetName = new File(targetRecord).getName();
                 log("[Target] 匹配记录文件: " + targetName);
 
-                // Step 4-6: TOCTOU apply, retried until the system font matches.
-                // Theme Store reads the whole record to validate its MD5 (many
-                // read events), closes it, then re-opens it to copy it into the
-                // system font path. Swap on the first close that follows a large
-                // read burst: validation sees the genuine file, the copy reads
-                // ours. Swapping on the "2nd open" is too late (that fd is
-                // already bound to the old inode). The window is ~30ms so the
-                // swap can lose the race; retry until it lands.
-                log("[4/6] 部署读取计数竞态监听器并触发替换（最多重试 6 次）...");
-                boolean applied = false;
-                String verifyRes = "";
-                for (int attempt = 1; attempt <= 6 && !applied; attempt++) {
-                    log("  尝试 " + attempt + "/6 ...");
-                    ensureHistoryPage();
-                    int[] xy = findApplyButtonXY();
-                    int tapX = (xy != null) ? xy[0] : 384;
-                    int tapY = (xy != null) ? xy[1] : 672;
+                // Step 4-5: run the ENTIRE TOCTOU orchestration as one self-
+                // contained Shizuku shell script. It runs under shizuku_server
+                // (a child of that process, NOT of this app), so it keeps running
+                // and finishes even if ColorOS kills this app after it backgrounds
+                // itself to drive the Theme Store. The script brings the Theme
+                // Store DIY history page forward, dismisses a stale -15 dialog,
+                // finds the "应用" button, arms the read-count swap, taps, and
+                // retries up to 6 times, writing the outcome to a result file.
+                // Earlier the orchestration lived in Java and pressed BACK from
+                // this app's own activity, which exited the app to the launcher
+                // (the "闪退"); doing it in the shell avoids that entirely.
+                log("[4/5] 启动自包含注入脚本（由 Shizuku 托管，闪退也不影响）...");
+                String want = selectedFontMd5.toLowerCase();
+                String script = "#!/system/bin/sh\n"
+                        + "COLOR_FONTS=\"" + colorFontsDir + "\"\n"
+                        + "TARGET=\"$COLOR_FONTS/" + targetName + "\"\n"
+                        + "NEW=/data/local/tmp/app_font_inject.ttf\n"
+                        + "ORIG=/data/local/tmp/.orig_genuine.ttf\n"
+                        + "SWAP=\"$COLOR_FONTS/.swap_ready.dat\"\n"
+                        + "SYS=/data/format_unclear/font/Customized-Regular.ttf\n"
+                        + "UIXML=/data/local/tmp/app_ui.xml\n"
+                        + "RESULT=/data/local/tmp/app_inject_result.txt\n"
+                        + "WANT=\"" + want + "\"\n"
+                        + "echo RUNNING > \"$RESULT\"\n"
+                        + "pkill -f inotifyd 2>/dev/null\n"
+                        + "cp \"$TARGET\" \"$ORIG\" 2>/dev/null\n"
+                        + "attempt=0\n"
+                        + "while [ \"$attempt\" -lt 6 ]; do\n"
+                        + "  attempt=$((attempt+1))\n"
+                        + "  j=0\n"
+                        + "  while [ \"$j\" -lt 6 ]; do\n"
+                        + "    FG=$(dumpsys activity activities | grep topResumedActivity | head -1)\n"
+                        + "    case \"$FG\" in *DiyFontHistoryActivity*) break;; esac\n"
+                        + "    uiautomator dump \"$UIXML\" >/dev/null 2>&1\n"
+                        + "    if grep -q \"知道了\" \"$UIXML\" 2>/dev/null; then\n"
+                        + "      DB=$(grep -oE 'text=\"知道了\"[^>]*bounds=\"\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]\"' \"$UIXML\" | head -1)\n"
+                        + "      set -- $(echo \"$DB\" | grep -oE '[0-9]+' | tail -4)\n"
+                        + "      [ \"$#\" -ge 4 ] && input tap $(( ($1+$3)/2 )) $(( ($2+$4)/2 ))\n"
+                        + "    fi\n"
+                        + "    input keyevent 4\n"
+                        + "    sleep 1.5\n"
+                        + "    j=$((j+1))\n"
+                        + "  done\n"
+                        + "  uiautomator dump \"$UIXML\" >/dev/null 2>&1\n"
+                        + "  LINE=$(grep -oE 'resource-id=\"[^\"]*/use\"[^>]*bounds=\"\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]\"' \"$UIXML\" | head -1)\n"
+                        + "  set -- $(echo \"$LINE\" | grep -oE '[0-9]+' | tail -4)\n"
+                        + "  if [ \"$#\" -ge 4 ]; then TX=$(( ($1+$3)/2 )); TY=$(( ($2+$4)/2 )); else TX=384; TY=672; fi\n"
+                        + "  cp \"$NEW\" \"$SWAP\"; chmod 666 \"$SWAP\" 2>/dev/null\n"
+                        + "  reads=0; DONE=\n"
+                        + "  /system/bin/inotifyd - \"$TARGET:aw0r\" | while read -r ev p r; do\n"
+                        + "    case \"$ev\" in\n"
+                        + "      *a*) reads=$((reads+1)) ;;\n"
+                        + "      *r*) reads=0 ;;\n"
+                        + "      *) if [ -z \"$DONE\" ] && [ \"${reads:-0}\" -gt 100 ]; then /system/bin/mv -f \"$SWAP\" \"$TARGET\"; DONE=1; fi; reads=0 ;;\n"
+                        + "    esac\n"
+                        + "  done &\n"
+                        + "  PID=$!\n"
+                        + "  sleep 0.4\n"
+                        + "  input tap \"$TX\" \"$TY\"\n"
+                        + "  sleep 8\n"
+                        + "  kill \"$PID\" 2>/dev/null; pkill -f inotifyd 2>/dev/null\n"
+                        + "  cp \"$ORIG\" \"$TARGET\" 2>/dev/null; rm -f \"$SWAP\"\n"
+                        + "  set -- $(md5sum \"$SYS\")\n"
+                        + "  if [ \"$1\" = \"$WANT\" ]; then echo \"SUCCESS $1\" > \"$RESULT\"; exit 0; fi\n"
+                        + "done\n"
+                        + "set -- $(md5sum \"$SYS\")\n"
+                        + "echo \"FAILED $1\" > \"$RESULT\"\n";
 
-                    String script = "#!/system/bin/sh\n"
-                            + "COLOR_FONTS=\"" + colorFontsDir + "\"\n"
-                            + "TARGET_NAME=\"" + targetName + "\"\n"
-                            + "TARGET=\"$COLOR_FONTS/$TARGET_NAME\"\n"
-                            + "ORIG=\"/data/local/tmp/.orig_genuine.ttf\"\n"
-                            + "SWAP_TMP=\"$COLOR_FONTS/.swap_ready.dat\"\n"
-                            + "pkill -f inotifyd 2>/dev/null\n"
-                            + "cp \"$TARGET\" \"$ORIG\"\n"
-                            + "cp /data/local/tmp/app_font_inject.ttf \"$SWAP_TMP\"\n"
-                            + "chmod 666 \"$SWAP_TMP\" 2>/dev/null\n"
-                            + "reads=0\n"
-                            + "/system/bin/inotifyd - \"$TARGET:aw0r\" | while read -r ev path rest; do\n"
-                            + "    case \"$ev\" in\n"
-                            + "        *a*) reads=$((reads+1)) ;;\n"
-                            + "        *r*) reads=0 ;;\n"
-                            + "        *)\n"
-                            + "            if [ -z \"$DONE\" ] && [ \"${reads:-0}\" -gt 100 ]; then\n"
-                            + "                /system/bin/mv -f \"$SWAP_TMP\" \"$TARGET\"\n"
-                            + "                DONE=1\n"
-                            + "            fi\n"
-                            + "            reads=0 ;;\n"
-                            + "    esac\n"
-                            + "done &\n"
-                            + "PIPE_PID=$!\n"
-                            + "sleep 0.4\n"
-                            + "input tap " + tapX + " " + tapY + "\n"
-                            + "sleep 8\n"
-                            + "kill $PIPE_PID 2>/dev/null\n"
-                            + "pkill -f inotifyd 2>/dev/null\n"
-                            + "cp \"$ORIG\" \"$TARGET\" 2>/dev/null\n"
-                            + "rm -f \"$SWAP_TMP\"\n";
-
-                    Process scriptProc = createShizukuProcess(new String[]{"sh", "-c", "cat > /data/local/tmp/run_app_inject.sh && chmod 755 /data/local/tmp/run_app_inject.sh && /data/local/tmp/run_app_inject.sh"});
-                    try (FileOutputStream fos = (FileOutputStream) scriptProc.getOutputStream()) {
-                        fos.write(script.getBytes());
-                        fos.flush();
-                    }
-                    scriptProc.waitFor();
-
-                    verifyRes = runShizukuShell("md5sum /data/format_unclear/font/Customized-Regular.ttf");
-                    applied = verifyRes.toLowerCase().contains(selectedFontMd5.toLowerCase());
-                    log("  系统字体: " + verifyRes.trim());
+                runShizukuShell("rm -f /data/local/tmp/app_inject_result.txt");
+                Process scriptProc = createShizukuProcess(new String[]{"sh", "-c", "cat > /data/local/tmp/run_app_inject.sh && chmod 755 /data/local/tmp/run_app_inject.sh && /data/local/tmp/run_app_inject.sh"});
+                try (FileOutputStream fos = (FileOutputStream) scriptProc.getOutputStream()) {
+                    fos.write(script.getBytes());
+                    fos.flush();
                 }
 
-                log("[6/6] 校验系统字体写入状态...");
-                log("[Result]\n" + verifyRes.trim());
+                // Poll the result file. The script is independent of this app, so
+                // even if ColorOS kills us while the Theme Store is foreground,
+                // the script finishes and writes RESULT; onResume() surfaces it.
+                log("[5/5] 等待注入结果（商店会被拉到前台，本应用可能退到后台）...");
+                String result = "";
+                for (int i = 0; i < 60; i++) {
+                    Thread.sleep(2000);
+                    result = runShizukuShell("cat /data/local/tmp/app_inject_result.txt 2>/dev/null").trim();
+                    if (result.startsWith("SUCCESS") || result.startsWith("FAILED")) break;
+                }
+                try { scriptProc.destroy(); } catch (Exception ignored) {}
 
-                final boolean success = applied;
+                final boolean success = result.startsWith("SUCCESS");
+                if (success || result.startsWith("FAILED")) {
+                    runShizukuShell("rm -f /data/local/tmp/app_inject_result.txt");
+                }
+                final String verifyRes = runShizukuShell("ls -la /data/format_unclear/font/Customized-Regular.ttf && md5sum /data/format_unclear/font/Customized-Regular.ttf");
+                log("[Result] " + result + "\n" + verifyRes.trim());
+
                 mainHandler.post(() -> {
                     btnInjectApply.setEnabled(true);
                     refreshSystemFontInfo();
@@ -494,7 +490,7 @@ public class MainActivity extends AppCompatActivity {
                     } else {
                         new AlertDialog.Builder(MainActivity.this)
                                 .setTitle("⚠️ 注入未完全对齐")
-                                .setMessage("系统字体 MD5 尚未与所选字体一致。\n\n提示：请确保主题商店已处于后台，或在主题商店“历史 DIY 记录”界面重试。")
+                                .setMessage("系统字体 MD5 尚未与所选字体一致。\n\n请先在主题商店打开到“历史 DIY 记录”界面，再回到本应用重试。")
                                 .setPositiveButton("知道了", null)
                                 .show();
                     }
