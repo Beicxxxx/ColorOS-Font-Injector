@@ -1,40 +1,40 @@
 package com.beichen.fontinjector;
 
-import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.OpenableColumns;
-import android.text.method.ScrollingMovementMethod;
+import android.view.LayoutInflater;
+import android.view.MenuItem;
 import android.view.View;
-import android.widget.Button;
+import android.view.ViewGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.appcompat.app.AlertDialog;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.core.widget.NestedScrollView;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
 
-import java.io.BufferedReader;
+import com.google.android.material.appbar.MaterialToolbar;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -45,66 +45,71 @@ public class MainActivity extends AppCompatActivity {
     private static final int SHIZUKU_REQ_CODE = 1001;
 
     private TextView tvShizukuStatus;
-    private Button btnReqShizuku;
     private TextView tvSysFontInfo;
-    private Button btnRefreshSysFont;
-    private TextView tvSelectedFontInfo;
-    private Button btnPickFont;
-    private Button btnInjectApply;
     private TextView tvLogs;
+    private TextView tvCount;
+    private TextView tvFontEmpty;
+    private MaterialButton btnReqShizuku;
+    private NestedScrollView logScroll;
+    private RecyclerView recycler;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final List<FontLibrary.Item> items = new ArrayList<>();
+    private FontAdapter adapter;
+    private boolean busy;
 
-    private File cachedFontFile = null;
-    private String selectedFontMd5 = "";
-    private long selectedFontSize = 0;
-    private int selectedFontUpem = 0;
-    private String selectedFontName = "";
-
-    private final Shizuku.OnRequestPermissionResultListener permissionListener = (requestCode, grantResult) -> {
-        if (requestCode == SHIZUKU_REQ_CODE) {
-            checkShizukuStatus();
-        }
-    };
+    private final Shizuku.OnRequestPermissionResultListener permissionListener =
+            (requestCode, grantResult) -> {
+                if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                    log("[Shizuku] 权限已授予");
+                } else {
+                    log("[Shizuku] 权限被拒绝");
+                }
+                checkShizukuStatus();
+            };
 
     private final Shizuku.OnBinderReceivedListener binderReceivedListener = this::checkShizukuStatus;
     private final Shizuku.OnBinderDeadListener binderDeadListener = this::checkShizukuStatus;
 
     private final ActivityResultLauncher<String[]> filePickerLauncher = registerForActivityResult(
-            new ActivityResultContracts.OpenDocument(),
-            uri -> {
-                if (uri != null) {
-                    handlePickedFont(uri);
-                }
-            }
-    );
+            new ActivityResultContracts.OpenDocument(), uri -> {
+                if (uri != null) importFont(uri);
+            });
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        applyWindowInsets();
 
         tvShizukuStatus = findViewById(R.id.tv_shizuku_status);
-        btnReqShizuku = findViewById(R.id.btn_req_shizuku);
-        tvSysFontInfo = findViewById(R.id.tv_sysfont_info);
-        btnRefreshSysFont = findViewById(R.id.btn_refresh_sysfont);
-        tvSelectedFontInfo = findViewById(R.id.tv_selected_font_info);
-        btnPickFont = findViewById(R.id.btn_pick_font);
-        btnInjectApply = findViewById(R.id.btn_inject_apply);
+        tvSysFontInfo = findViewById(R.id.tv_sys_font_info);
         tvLogs = findViewById(R.id.tv_logs);
-        tvLogs.setMovementMethod(new ScrollingMovementMethod());
+        tvCount = findViewById(R.id.tv_count);
+        tvFontEmpty = findViewById(R.id.tv_font_empty);
+        btnReqShizuku = findViewById(R.id.btn_req_shizuku);
+        logScroll = findViewById(R.id.log_scroll);
+        recycler = findViewById(R.id.recycler_fonts);
+
+        adapter = new FontAdapter();
+        recycler.setLayoutManager(new LinearLayoutManager(this));
+        recycler.setAdapter(adapter);
+
+        MaterialToolbar toolbar = findViewById(R.id.toolbar);
+        toolbar.inflateMenu(R.menu.menu_main);
+        toolbar.setOnMenuItemClickListener(this::onMenuItem);
 
         btnReqShizuku.setOnClickListener(v -> requestShizukuPermission());
-        btnRefreshSysFont.setOnClickListener(v -> refreshSystemFontInfo());
-        btnPickFont.setOnClickListener(v -> filePickerLauncher.launch(new String[]{"*/*"}));
-        btnInjectApply.setOnClickListener(v -> executeInjection());
+        findViewById(R.id.btn_refresh_sys).setOnClickListener(v -> refreshSystemFontInfo());
+        findViewById(R.id.btn_backup).setOnClickListener(v -> backupSystemFont());
+        findViewById(R.id.fab_import).setOnClickListener(v -> filePickerLauncher.launch(
+                new String[]{"font/ttf", "font/otf", "application/octet-stream", "*/*"}));
+
+        applyWindowInsets();
 
         Shizuku.addRequestPermissionResultListener(permissionListener);
-        Shizuku.addBinderReceivedListener(binderReceivedListener);
+        Shizuku.addBinderReceivedListenerSticky(binderReceivedListener);
         Shizuku.addBinderDeadListener(binderDeadListener);
-
         checkShizukuStatus();
     }
 
@@ -114,27 +119,18 @@ public class MainActivity extends AppCompatActivity {
         Shizuku.removeRequestPermissionResultListener(permissionListener);
         Shizuku.removeBinderReceivedListener(binderReceivedListener);
         Shizuku.removeBinderDeadListener(binderDeadListener);
+        executor.shutdownNow();
     }
 
-    private void log(String msg) {
-        mainHandler.post(() -> {
-            tvLogs.append(msg + "\n");
-            final int scrollAmount = tvLogs.getLayout() != null ?
-                    tvLogs.getLayout().getLineTop(tvLogs.getLineCount()) - tvLogs.getHeight() : 0;
-            if (scrollAmount > 0) {
-                tvLogs.scrollTo(0, scrollAmount);
-            }
-        });
-    }
+    // ---------- 窗口 ----------
 
-    // targetSdk 35+ 在 Android 15/16 强制 edge-to-edge，必须自己让开状态栏/导航栏
     private void applyWindowInsets() {
         View root = findViewById(R.id.root);
-        ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
-            Insets bars = insets.getInsets(
+        ViewCompat.setOnApplyWindowInsetsListener(root, (v, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(
                     WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
             v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-            return insets;
+            return WindowInsetsCompat.CONSUMED;
         });
         boolean night = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
                 == Configuration.UI_MODE_NIGHT_YES;
@@ -143,297 +139,289 @@ public class MainActivity extends AppCompatActivity {
         controller.setAppearanceLightNavigationBars(!night);
     }
 
+    // ---------- Shizuku ----------
+
+    private boolean shellReady() {
+        return Shizuku.pingBinder()
+                && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
+    }
+
     private void checkShizukuStatus() {
         if (!Shizuku.pingBinder()) {
             tvShizukuStatus.setText("❌ Shizuku 未运行，请先在 Shizuku 应用中启动服务");
             btnReqShizuku.setVisibility(View.GONE);
-            btnInjectApply.setEnabled(false);
+            tvSysFontInfo.setText("需 Shizuku 授权后读取系统字体现状");
+            reloadFonts();
             return;
         }
-
         if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
             tvShizukuStatus.setText("✅ Shizuku 权限已获取 (Shell UID=2000)");
             btnReqShizuku.setVisibility(View.GONE);
-            if (cachedFontFile != null) {
-                btnInjectApply.setEnabled(true);
-            }
             refreshSystemFontInfo();
-        } else if (Shizuku.shouldShowRequestPermissionRationale()) {
-            tvShizukuStatus.setText("⚠️ 未授予 Shizuku 权限");
-            btnReqShizuku.setVisibility(View.VISIBLE);
-            btnInjectApply.setEnabled(false);
         } else {
             tvShizukuStatus.setText("⚠️ 未授予 Shizuku 权限");
             btnReqShizuku.setVisibility(View.VISIBLE);
-            btnInjectApply.setEnabled(false);
         }
+        reloadFonts();
     }
 
     private void requestShizukuPermission() {
         if (Shizuku.pingBinder()) {
             Shizuku.requestPermission(SHIZUKU_REQ_CODE);
         } else {
-            Toast.makeText(this, "Shizuku 未运行，请启动 Shizuku", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Shizuku 未运行，请先启动 Shizuku", Toast.LENGTH_SHORT).show();
         }
     }
 
     private void refreshSystemFontInfo() {
-        if (!Shizuku.pingBinder() || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            tvSysFontInfo.setText("需 Shizuku 授权后读取");
+        if (!shellReady()) {
+            tvSysFontInfo.setText("需 Shizuku 授权后读取系统字体现状");
             return;
         }
-
         executor.execute(() -> {
-            String res = runShizukuShell("ls -la /data/format_unclear/font/Customized-Regular.ttf && md5sum /data/format_unclear/font/Customized-Regular.ttf");
+            String res = Shell.run("ls -la " + FontLibrary.SYS_FONT
+                    + " && md5sum " + FontLibrary.SYS_FONT).trim();
+            mainHandler.post(() -> tvSysFontInfo.setText(
+                    res.contains("Customized-Regular.ttf") ? res : "未检测到生效字体（可能为系统默认字体）"));
+        });
+    }
+
+    /** 用当前生效的系统字体做一份备份，落进字体库，可随时再应用回去。 */
+    private void backupSystemFont() {
+        log("[Backup] 开始读取系统字体…");
+        if (!shellReady()) {
+            Toast.makeText(this, "需要先授予 Shizuku 权限", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        executor.execute(() -> {
+            File file = FontLibrary.backupSystemFont(this,
+                    History.now().replace(" ", "_").replace(":", ""));
             mainHandler.post(() -> {
-                if (res.contains("Customized-Regular.ttf")) {
-                    tvSysFontInfo.setText(res.trim());
-                } else {
-                    tvSysFontInfo.setText("未检测到生效字体 (可能为默认系统字体)");
+                if (file == null) {
+                    log("[Error] 备份失败：读不到系统字体");
+                    Toast.makeText(this, "备份失败", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                History.Entry e = new History.Entry();
+                e.ts = History.now();
+                e.action = "backup";
+                e.font = file.getName();
+                e.ok = true;
+                e.note = TtfUtil.size(file.length());
+                e.path = file.getAbsolutePath();
+                History.add(this, e);
+                log("[Backup] 已备份当前系统字体 → " + file.getName());
+                Toast.makeText(this, "已备份到字体库", Toast.LENGTH_SHORT).show();
+                reloadFonts();
+            });
+        });
+    }
+
+    // ---------- 字体库 ----------
+
+    private void reloadFonts() {
+        boolean shellOk = shellReady();
+        executor.execute(() -> {
+            List<FontLibrary.Item> list = FontLibrary.list(this, shellOk);
+            mainHandler.post(() -> {
+                items.clear();
+                items.addAll(list);
+                adapter.notifyDataSetChanged();
+                tvCount.setText(items.size() + " 个");
+                tvFontEmpty.setVisibility(items.isEmpty() ? View.VISIBLE : View.GONE);
+            });
+        });
+    }
+
+    private void importFont(Uri uri) {
+        executor.execute(() -> {
+            File saved = FontLibrary.savePicked(this, uri);
+            mainHandler.post(() -> {
+                if (saved == null) {
+                    log("[Error] 导入失败");
+                    Toast.makeText(this, "导入失败", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                log("[Import] 已导入 " + saved.getName() + " (" + TtfUtil.size(saved.length()) + ")");
+                reloadFonts();
+            });
+        });
+    }
+
+    private void applyFont(FontLibrary.Item item) {
+        if (busy) return;
+        if (!shellReady()) {
+            Toast.makeText(this, "需要先授予 Shizuku 权限", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        busy = true;
+        log("\n========== 开始注入：" + item.name + " ==========");
+        executor.execute(() -> {
+            File file = FontLibrary.ensureLocal(this, item);
+            if (file == null) {
+                mainHandler.post(() -> {
+                    busy = false;
+                    log("[Error] 读不到文件：" + item.path);
+                });
+                return;
+            }
+            Injector.apply(this, file, item.name, new Injector.Callback() {
+                @Override
+                public void onLog(String line) {
+                    log(line);
+                }
+
+                @Override
+                public void onFinish(boolean success, String systemInfo) {
+                    busy = false;
+                    refreshSystemFontInfo();
+                    new MaterialAlertDialogBuilder(MainActivity.this)
+                            .setTitle(success ? "🎉 注入成功" : "⚠️ 注入未对齐")
+                            .setMessage(success
+                                    ? "系统字体已替换为 " + item.name + "，无需重启。\n\n" + systemInfo
+                                    : "系统字体 MD5 与所选字体不一致。\n\n请确认主题商店已有 DIY 字体记录，"
+                                      + "并确保执行时主题商店处在该 DIY 字体页面上后重试。")
+                            .setPositiveButton("好", null)
+                            .show();
                 }
             });
         });
     }
 
-    private void handlePickedFont(Uri uri) {
+    private void showFontActions(FontLibrary.Item item) {
+        String meta = "来源：" + item.source
+                + "\n大小：" + TtfUtil.size(item.size)
+                + (item.upem > 0 ? "\nUPM：" + item.upem : "")
+                + (item.family.isEmpty() ? "" : "\n家族名：" + item.family)
+                + "\n路径：" + item.path;
+        // AlertDialog 不支持 message + setItems 同时展示，三个动作直接用三个按钮
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(item.name)
+                .setMessage(meta)
+                .setPositiveButton("应用", (d, w) -> applyFont(item))
+                .setNeutralButton("保存", (d, w) -> exportFont(item))
+                .setNegativeButton("删除", (d, w) -> deleteFont(item))
+                .show();
+    }
+
+    private void exportFont(FontLibrary.Item item) {
         executor.execute(() -> {
-            try {
-                String fileName = "selected.ttf";
-                try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
-                    if (cursor != null && cursor.moveToFirst()) {
-                        int idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                        if (idx >= 0) fileName = cursor.getString(idx);
-                    }
+            File file = FontLibrary.ensureLocal(this, item);
+            boolean ok = file != null && FontLibrary.exportToDownload(file, item.name);
+            mainHandler.post(() -> {
+                if (ok) {
+                    History.Entry e = new History.Entry();
+                    e.ts = History.now();
+                    e.action = "export";
+                    e.font = item.name;
+                    e.ok = true;
+                    History.add(this, e);
+                    log("[Export] 已保存到 /sdcard/Download/" + item.name);
+                } else {
+                    log("[Error] 导出失败：" + item.name);
                 }
-                selectedFontName = fileName;
-
-                File cacheFile = new File(getCacheDir(), "picked_font.ttf");
-                try (InputStream in = getContentResolver().openInputStream(uri);
-                     FileOutputStream out = new FileOutputStream(cacheFile)) {
-                    byte[] buf = new byte[65536];
-                    int len;
-                    while ((len = in.read(buf)) != -1) {
-                        out.write(buf, 0, len);
-                    }
-                }
-                cachedFontFile = cacheFile;
-                selectedFontSize = cacheFile.length();
-                selectedFontMd5 = calculateMd5(cacheFile);
-                selectedFontUpem = parseTtfUpem(cacheFile);
-
-                mainHandler.post(() -> {
-                    String info = "名称: " + selectedFontName + "\n"
-                            + "大小: " + String.format("%.2f MB", selectedFontSize / (1024.0 * 1024.0)) + " (" + selectedFontSize + " 字节)\n"
-                            + "MD5: " + selectedFontMd5 + "\n"
-                            + "unitsPerEm: " + selectedFontUpem + (selectedFontUpem == 256 ? " (标准)" : " (非 256)");
-                    tvSelectedFontInfo.setText(info);
-                    log("[File] 已加载字体: " + selectedFontName + ", UPEM=" + selectedFontUpem);
-
-                    if (Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
-                        btnInjectApply.setEnabled(true);
-                    }
-                });
-
-            } catch (Exception e) {
-                log("[Error] 读取字体失败: " + e.getMessage());
-            }
+                Toast.makeText(this, ok ? "已保存到 Download" : "导出失败", Toast.LENGTH_SHORT).show();
+            });
         });
     }
 
-    private int parseTtfUpem(File file) {
-        try (FileInputStream fis = new FileInputStream(file)) {
-            byte[] header = new byte[12];
-            if (fis.read(header) < 12) return 0;
-            ByteBuffer bb = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN);
-            bb.getInt(); // sfntVersion
-            int numTables = bb.getShort() & 0xFFFF;
-
-            for (int i = 0; i < numTables; i++) {
-                byte[] entry = new byte[16];
-                if (fis.read(entry) < 16) break;
-                String tag = new String(entry, 0, 4);
-                if ("head".equals(tag)) {
-                    ByteBuffer entryBb = ByteBuffer.wrap(entry).order(ByteOrder.BIG_ENDIAN);
-                    entryBb.position(8);
-                    int offset = entryBb.getInt();
-
-                    // Read head table
-                    try (FileInputStream headFis = new FileInputStream(file)) {
-                        headFis.skip(offset + 18);
-                        byte[] upemBuf = new byte[2];
-                        if (headFis.read(upemBuf) == 2) {
-                            return ByteBuffer.wrap(upemBuf).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
-                        }
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
-        return 0;
+    private void deleteFont(FontLibrary.Item item) {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("删除字体")
+                .setMessage("确定删除 " + item.name + " ？")
+                .setPositiveButton("删除", (d, w) -> executor.execute(() -> {
+                    boolean ok = FontLibrary.delete(this, item);
+                    mainHandler.post(() -> {
+                        log(ok ? "[Delete] 已删除 " + item.name : "[Error] 删除失败");
+                        reloadFonts();
+                    });
+                }))
+                .setNegativeButton("取消", null)
+                .show();
     }
 
-    private String calculateMd5(File file) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("MD5");
-        try (InputStream is = new FileInputStream(file)) {
-            byte[] buffer = new byte[65536];
-            int read;
-            while ((read = is.read(buffer)) > 0) {
-                digest.update(buffer, 0, read);
-            }
+    // ---------- 菜单 ----------
+
+    private boolean onMenuItem(MenuItem mi) {
+        int id = mi.getItemId();
+        if (id == R.id.action_diy) {
+            launch("com.heytap.themestore", "未安装主题商店");
+        } else if (id == R.id.action_shizuku) {
+            launch("moe.shizuku.privileged.api", "未安装 Shizuku");
+        } else if (id == R.id.action_history) {
+            startActivity(new Intent(this, HistoryActivity.class));
+        } else if (id == R.id.action_about) {
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle("使用说明")
+                    .setMessage("1. 装好 Shizuku 并授权本应用（uid 2000 shell）。\n"
+                            + "2. 在主题商店「字体」里做一款 DIY 字体，确保目录 "
+                            + "Themes/.data/temp/<id>/colorFonts/ 下已有 *_colorFont_*.ttf 记录。\n"
+                            + "3. 回到本应用，导入或从字体库选字体 → 应用；注入期间会自动点主题商店的"
+                            + "「应用」按钮（坐标按机型写死）。\n"
+                            + "4. 改 UPEM / 缩放 / 假粗 / CFF 转 TTF 请先用 fontctl 处理好再导入。\n\n"
+                            + "提示：注入前记得先备份系统字体，出问题可在历史里回滚。")
+                    .setPositiveButton("知道了", null)
+                    .show();
         }
-        byte[] md5sum = digest.digest();
-        StringBuilder sb = new StringBuilder();
-        for (byte b : md5sum) {
-            sb.append(String.format("%02x", b & 0xff));
-        }
-        return sb.toString();
+        return true;
     }
 
-    private Process createShizukuProcess(String[] cmd) throws Exception {
-        java.lang.reflect.Method method = Shizuku.class.getDeclaredMethod("newProcess", String[].class, String[].class, String.class);
-        method.setAccessible(true);
-        return (Process) method.invoke(null, cmd, null, null);
-    }
-
-    private String runShizukuShell(String cmd) {
-        StringBuilder output = new StringBuilder();
-        try {
-            Process process = createShizukuProcess(new String[]{"sh", "-c", cmd});
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append("\n");
-                }
-            }
-            process.waitFor();
-        } catch (Exception e) {
-            output.append("Error: ").append(e.getMessage());
-        }
-        return output.toString();
-    }
-
-    private void executeInjection() {
-        if (cachedFontFile == null || !cachedFontFile.exists()) {
-            Toast.makeText(this, "请先选择字体文件", Toast.LENGTH_SHORT).show();
+    private void launch(String pkg, String error) {
+        Intent intent = getPackageManager().getLaunchIntentForPackage(pkg);
+        if (intent == null) {
+            Toast.makeText(this, error, Toast.LENGTH_SHORT).show();
             return;
         }
+        startActivity(intent);
+    }
 
-        btnInjectApply.setEnabled(false);
-        log("\n========== 开始 TOCTOU 注入 ==========");
+    // ---------- 日志 ----------
 
-        executor.execute(() -> {
-            try {
-                // Step 1: Copy selected font to /data/local/tmp/app_font_inject.ttf
-                log("[1/6] 暂存字体文件至设备运行环境...");
-                String pushCmd = "cat > /data/local/tmp/app_font_inject.ttf && chmod 666 /data/local/tmp/app_font_inject.ttf";
-                Process pushProc = createShizukuProcess(new String[]{"sh", "-c", pushCmd});
-                try (FileInputStream fis = new FileInputStream(cachedFontFile);
-                     FileOutputStream pos = (FileOutputStream) pushProc.getOutputStream()) {
-                    byte[] buf = new byte[65536];
-                    int len;
-                    while ((len = fis.read(buf)) != -1) {
-                        pos.write(buf, 0, len);
-                    }
-                    pos.flush();
-                }
-                pushProc.waitFor();
-
-                // Step 2: Locate Theme Store DIY folder
-                log("[2/6] 定位主题商店 DIY 数据目录...");
-                String diyDirRes = runShizukuShell("ls -d /sdcard/Android/data/com.heytap.themestore/files/Themes/.data/temp/*/colorFonts 2>/dev/null").trim();
-                if (diyDirRes.isEmpty()) {
-                    log("[Error] 未找到主题商店 DIY 目录！请先在主题商店中下载或生成一款 DIY 字体。");
-                    mainHandler.post(() -> btnInjectApply.setEnabled(true));
-                    return;
-                }
-                String colorFontsDir = diyDirRes.split("\n")[0].trim();
-                String baseDiyDir = new File(colorFontsDir).getParent();
-                log("[ThemeStore] 基础目录: " + baseDiyDir);
-
-                // Step 3: Find target record file
-                log("[3/6] 查找当前有效的 DIY 记录模板...");
-                String recordsRes = runShizukuShell("ls -t " + colorFontsDir + "/*_colorFont_*.ttf 2>/dev/null").trim();
-                if (recordsRes.isEmpty()) {
-                    log("[Error] colorFonts 目录下无历史记录文件！");
-                    mainHandler.post(() -> btnInjectApply.setEnabled(true));
-                    return;
-                }
-                String targetRecord = recordsRes.split("\n")[0].trim();
-                String targetName = new File(targetRecord).getName();
-                log("[Target] 匹配记录文件: " + targetName);
-
-                // Step 4: Prepare atomic staging & inotifyd hook script
-                log("[4/6] 部署精确原子 Inode 竞态监听器...");
-                String script = "#!/system/bin/sh\n"
-                        + "DIR=\"" + baseDiyDir + "\"\n"
-                        + "COLOR_FONTS=\"$DIR/colorFonts\"\n"
-                        + "TARGET_NAME=\"" + targetName + "\"\n"
-                        + "TARGET=\"$COLOR_FONTS/$TARGET_NAME\"\n"
-                        + "ORIG=\"$DIR/.orig_backup_clean.ttf\"\n"
-                        + "SWAP_TMP=\"$COLOR_FONTS/.swap_ready.dat\"\n"
-                        + "input keyevent 4\n"
-                        + "sleep 0.4\n"
-                        + "pkill -f inotifyd 2>/dev/null\n"
-                        + "if [ ! -f \"$ORIG\" ]; then cp \"$TARGET\" \"$ORIG\"; fi\n"
-                        + "cp \"$ORIG\" \"$TARGET\"\n"
-                        + "cp /data/local/tmp/app_font_inject.ttf \"$SWAP_TMP\"\n"
-                        + "chmod 666 \"$TARGET\" \"$SWAP_TMP\"\n"
-                        + "rm -f /data/local/tmp/app_swap.log\n"
-                        + "/system/bin/inotifyd - \"$COLOR_FONTS:r\" | while read -r ev d f; do\n"
-                        + "    if [ \"$f\" = \"$TARGET_NAME\" ]; then\n"
-                        + "        COUNT=$((COUNT + 1))\n"
-                        + "        if [ \"$COUNT\" -eq 2 ]; then\n"
-                        + "            /system/bin/mv -f \"$SWAP_TMP\" \"$TARGET\"\n"
-                        + "            echo \"SWAPPED\" > /data/local/tmp/app_swap.log\n"
-                        + "        fi\n"
-                        + "    fi\n"
-                        + "done &\n"
-                        + "PIPE_PID=$!\n"
-                        + "sleep 0.3\n"
-                        + "input tap 1056 672\n"
-                        + "sleep 3.5\n"
-                        + "kill $PIPE_PID 2>/dev/null\n"
-                        + "pkill -f inotifyd 2>/dev/null\n"
-                        + "cp \"$ORIG\" \"$TARGET\"\n"
-                        + "chmod 666 \"$TARGET\"\n"
-                        + "rm -f \"$SWAP_TMP\"\n";
-
-                // Step 5: Execute script via Shizuku
-                log("[5/6] 触发无感替换流程...");
-                Process scriptProc = createShizukuProcess(new String[]{"sh", "-c", "cat > /data/local/tmp/run_app_inject.sh && chmod 755 /data/local/tmp/run_app_inject.sh && /data/local/tmp/run_app_inject.sh"});
-                try (FileOutputStream fos = (FileOutputStream) scriptProc.getOutputStream()) {
-                    fos.write(script.getBytes());
-                    fos.flush();
-                }
-                scriptProc.waitFor();
-
-                // Step 6: Verify system font
-                log("[6/6] 校验系统字体写入状态...");
-                String verifyRes = runShizukuShell("ls -la /data/format_unclear/font/Customized-Regular.ttf && md5sum /data/format_unclear/font/Customized-Regular.ttf");
-                log("[Result]\n" + verifyRes.trim());
-
-                boolean success = verifyRes.toLowerCase().contains(selectedFontMd5.toLowerCase());
-                mainHandler.post(() -> {
-                    btnInjectApply.setEnabled(true);
-                    refreshSystemFontInfo();
-                    if (success) {
-                        new AlertDialog.Builder(MainActivity.this)
-                                .setTitle("🎉 注入成功！")
-                                .setMessage("系统字体已成功替换为 " + selectedFontName + "！\n\nMD5: " + selectedFontMd5 + "\n大小: " + selectedFontSize + " 字节\n\n新字体已即刻生效，无需重启设备。")
-                                .setPositiveButton("太棒了", null)
-                                .show();
-                    } else {
-                        new AlertDialog.Builder(MainActivity.this)
-                                .setTitle("⚠️ 注入未完全对齐")
-                                .setMessage("系统字体 MD5 尚未与所选字体一致。\n\n提示：请确保主题商店已处于后台，或在主题商店“历史 DIY 记录”界面重试。")
-                                .setPositiveButton("知道了", null)
-                                .show();
-                    }
-                });
-
-            } catch (Exception e) {
-                log("[Fatal Error] " + e.getMessage());
-                mainHandler.post(() -> btnInjectApply.setEnabled(true));
-            }
+    private void log(String msg) {
+        mainHandler.post(() -> {
+            tvLogs.append(msg + "\n");
+            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         });
+    }
+
+    // ---------- 列表 ----------
+
+    private class FontAdapter extends RecyclerView.Adapter<FontAdapter.VH> {
+
+        class VH extends RecyclerView.ViewHolder {
+            final TextView name;
+            final TextView meta;
+            final MaterialButton apply;
+
+            VH(View v) {
+                super(v);
+                name = v.findViewById(R.id.tv_name);
+                meta = v.findViewById(R.id.tv_meta);
+                apply = v.findViewById(R.id.btn_apply);
+            }
+        }
+
+        @NonNull
+        @Override
+        public VH onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            return new VH(LayoutInflater.from(parent.getContext())
+                    .inflate(R.layout.item_font, parent, false));
+        }
+
+        @Override
+        public void onBindViewHolder(@NonNull VH holder, int position) {
+            FontLibrary.Item item = items.get(position);
+            holder.name.setText(item.name);
+            String meta = item.source + " · " + TtfUtil.size(item.size)
+                    + (item.upem > 0 ? String.format(Locale.US, " · UPM %d", item.upem) : "");
+            holder.meta.setText(meta);
+            holder.apply.setOnClickListener(v -> applyFont(item));
+            holder.itemView.setOnClickListener(v -> showFontActions(item));
+        }
+
+        @Override
+        public int getItemCount() {
+            return items.size();
+        }
     }
 }

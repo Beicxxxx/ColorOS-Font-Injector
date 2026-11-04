@@ -17,6 +17,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".HistoryActivity"
+            android:exported="false"
+            android:label="历史记录" />
+
         <!-- Shizuku 服务端（shell, uid 2000）通过这个 provider 把 binder 推进本进程；
              缺了它 Shizuku.pingBinder() 永远返回 false。 -->
         <provider
@@ -27,5 +32,6 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
+
 
 </manifest>
