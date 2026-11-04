@@ -39,7 +39,7 @@
 本项目包含两个开箱即用的交付形式：
 
 1. **Android 手机客户端 (`app/`)**：在手机上直接配合 Shizuku 使用，随时选取任意本地 `.ttf` 字体一键注入，彻底脱离电脑。
-2. **Antigravity AI Agent Skill (`skill/`)**：规范化 Agent 技能包，供 AI 编码智能体（如 Google Antigravity）通过 harness / adb 自动化部署与注入。
+2. **通用 AI Agent 技能包 (`skill/`)**：遵循通用 Agent Skill 规范（包含 `SKILL.md` 与自动化脚本），支持**任意 Coding Harness 与 AI Agent**（如 Claude Code, Cursor, Windsurf, Aider, Antigravity, OpenHands 等）直接读取与自动化执行。
 
 ---
 
@@ -59,18 +59,25 @@
 
 ---
 
-## 🤖 二、AI Agent 技能使用指南 (Antigravity Skill)
+## 🤖 二、AI Agent 技能使用指南 (Harness-Agnostic Agent Skill)
 
-如果你正在使用 Antigravity 或其他接入 ADB 的 AI Agent，可以直接将本 Skill 载入工作区或全局配置：
+本 Skill 采用开放通用的 Agent Skill 标准定义（YAML Frontmatter 元数据 + 结构化指引 + 可执行脚本），**不绑定任何特定厂商或 Harness**。任何具备终端执行能力或连接了 ADB/无线调试的 AI Agent 均可零门槛加载：
 
-### 安装 Skill
-将 `skill/` 目录放置在 Agent 的技能目录下：
-```bash
-~/.gemini/config/skills/coloros-font-injector/
-```
+### 支持的 Agent / Harness
+* **Claude Code / Anthropic Agent**
+* **Cursor / Windsurf / Copilot**
+* **Aider / OpenHands**
+* **Google Antigravity / Gemini CLI**
+* **任意自定义 Agent 框架与脚本**
+
+### 安装与集成方式
+将 `skill/` 目录挂载或复制到你所使用的 Harness 技能路径，例如：
+* **Antigravity / Gemini 全局技能**：`~/.gemini/config/skills/coloros-font-injector/`
+* **Claude Code /通用项目工作区**：放置于工作区 `.skills/coloros-font-injector/` 或直接在对话中将 `skill/SKILL.md` 加入上下文
+* **Cursor / Windsurf**：在 `.cursorrules` 或工作区提示词中直接引用 `skill/SKILL.md`
 
 ### 自动化 CLI 脚本
-在电脑端终端运行：
+Agent 或开发者可在电脑终端直接执行配套脚本：
 ```bash
 # 自动检测设备、UPEM 缩放、部署 Inode 监听并执行注入
 python skill/scripts/inject_font.py --font /path/to/myfont.ttf [-s <device_serial>]
