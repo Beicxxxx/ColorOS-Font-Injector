@@ -1,0 +1,416 @@
+package com.beichen.fontinjector;
+
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.OpenableColumns;
+import android.text.method.ScrollingMovementMethod;
+import android.view.View;
+import android.widget.Button;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.security.MessageDigest;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import rikka.shizuku.Shizuku;
+
+public class MainActivity extends AppCompatActivity {
+
+    private static final int SHIZUKU_REQ_CODE = 1001;
+
+    private TextView tvShizukuStatus;
+    private Button btnReqShizuku;
+    private TextView tvSysFontInfo;
+    private Button btnRefreshSysFont;
+    private TextView tvSelectedFontInfo;
+    private Button btnPickFont;
+    private Button btnInjectApply;
+    private TextView tvLogs;
+
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    private File cachedFontFile = null;
+    private String selectedFontMd5 = "";
+    private long selectedFontSize = 0;
+    private int selectedFontUpem = 0;
+    private String selectedFontName = "";
+
+    private final Shizuku.OnRequestPermissionResultListener permissionListener = (requestCode, grantResult) -> {
+        if (requestCode == SHIZUKU_REQ_CODE) {
+            checkShizukuStatus();
+        }
+    };
+
+    private final Shizuku.OnBinderReceivedListener binderReceivedListener = this::checkShizukuStatus;
+    private final Shizuku.OnBinderDeadListener binderDeadListener = this::checkShizukuStatus;
+
+    private final ActivityResultLauncher<String[]> filePickerLauncher = registerForActivityResult(
+            new ActivityResultContracts.OpenDocument(),
+            uri -> {
+                if (uri != null) {
+                    handlePickedFont(uri);
+                }
+            }
+    );
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        tvShizukuStatus = findViewById(R.id.tv_shizuku_status);
+        btnReqShizuku = findViewById(R.id.btn_req_shizuku);
+        tvSysFontInfo = findViewById(R.id.tv_sysfont_info);
+        btnRefreshSysFont = findViewById(R.id.btn_refresh_sysfont);
+        tvSelectedFontInfo = findViewById(R.id.tv_selected_font_info);
+        btnPickFont = findViewById(R.id.btn_pick_font);
+        btnInjectApply = findViewById(R.id.btn_inject_apply);
+        tvLogs = findViewById(R.id.tv_logs);
+        tvLogs.setMovementMethod(new ScrollingMovementMethod());
+
+        btnReqShizuku.setOnClickListener(v -> requestShizukuPermission());
+        btnRefreshSysFont.setOnClickListener(v -> refreshSystemFontInfo());
+        btnPickFont.setOnClickListener(v -> filePickerLauncher.launch(new String[]{"*/*"}));
+        btnInjectApply.setOnClickListener(v -> executeInjection());
+
+        Shizuku.addRequestPermissionResultListener(permissionListener);
+        Shizuku.addBinderReceivedListener(binderReceivedListener);
+        Shizuku.addBinderDeadListener(binderDeadListener);
+
+        checkShizukuStatus();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Shizuku.removeRequestPermissionResultListener(permissionListener);
+        Shizuku.removeBinderReceivedListener(binderReceivedListener);
+        Shizuku.removeBinderDeadListener(binderDeadListener);
+    }
+
+    private void log(String msg) {
+        mainHandler.post(() -> {
+            tvLogs.append(msg + "\n");
+            final int scrollAmount = tvLogs.getLayout() != null ?
+                    tvLogs.getLayout().getLineTop(tvLogs.getLineCount()) - tvLogs.getHeight() : 0;
+            if (scrollAmount > 0) {
+                tvLogs.scrollTo(0, scrollAmount);
+            }
+        });
+    }
+
+    private void checkShizukuStatus() {
+        if (!Shizuku.pingBinder()) {
+            tvShizukuStatus.setText("❌ Shizuku 未运行，请先在 Shizuku 应用中启动服务");
+            btnReqShizuku.setVisibility(View.GONE);
+            btnInjectApply.setEnabled(false);
+            return;
+        }
+
+        if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+            tvShizukuStatus.setText("✅ Shizuku 权限已获取 (Shell UID=2000)");
+            btnReqShizuku.setVisibility(View.GONE);
+            if (cachedFontFile != null) {
+                btnInjectApply.setEnabled(true);
+            }
+            refreshSystemFontInfo();
+        } else if (Shizuku.shouldShowRequestPermissionRationale()) {
+            tvShizukuStatus.setText("⚠️ 未授予 Shizuku 权限");
+            btnReqShizuku.setVisibility(View.VISIBLE);
+            btnInjectApply.setEnabled(false);
+        } else {
+            tvShizukuStatus.setText("⚠️ 未授予 Shizuku 权限");
+            btnReqShizuku.setVisibility(View.VISIBLE);
+            btnInjectApply.setEnabled(false);
+        }
+    }
+
+    private void requestShizukuPermission() {
+        if (Shizuku.pingBinder()) {
+            Shizuku.requestPermission(SHIZUKU_REQ_CODE);
+        } else {
+            Toast.makeText(this, "Shizuku 未运行，请启动 Shizuku", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void refreshSystemFontInfo() {
+        if (!Shizuku.pingBinder() || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            tvSysFontInfo.setText("需 Shizuku 授权后读取");
+            return;
+        }
+
+        executor.execute(() -> {
+            String res = runShizukuShell("ls -la /data/format_unclear/font/Customized-Regular.ttf && md5sum /data/format_unclear/font/Customized-Regular.ttf");
+            mainHandler.post(() -> {
+                if (res.contains("Customized-Regular.ttf")) {
+                    tvSysFontInfo.setText(res.trim());
+                } else {
+                    tvSysFontInfo.setText("未检测到生效字体 (可能为默认系统字体)");
+                }
+            });
+        });
+    }
+
+    private void handlePickedFont(Uri uri) {
+        executor.execute(() -> {
+            try {
+                String fileName = "selected.ttf";
+                try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+                    if (cursor != null && cursor.moveToFirst()) {
+                        int idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                        if (idx >= 0) fileName = cursor.getString(idx);
+                    }
+                }
+                selectedFontName = fileName;
+
+                File cacheFile = new File(getCacheDir(), "picked_font.ttf");
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     FileOutputStream out = new FileOutputStream(cacheFile)) {
+                    byte[] buf = new byte[65536];
+                    int len;
+                    while ((len = in.read(buf)) != -1) {
+                        out.write(buf, 0, len);
+                    }
+                }
+                cachedFontFile = cacheFile;
+                selectedFontSize = cacheFile.length();
+                selectedFontMd5 = calculateMd5(cacheFile);
+                selectedFontUpem = parseTtfUpem(cacheFile);
+
+                mainHandler.post(() -> {
+                    String info = "名称: " + selectedFontName + "\n"
+                            + "大小: " + String.format("%.2f MB", selectedFontSize / (1024.0 * 1024.0)) + " (" + selectedFontSize + " 字节)\n"
+                            + "MD5: " + selectedFontMd5 + "\n"
+                            + "unitsPerEm: " + selectedFontUpem + (selectedFontUpem == 256 ? " (标准)" : " (非 256)");
+                    tvSelectedFontInfo.setText(info);
+                    log("[File] 已加载字体: " + selectedFontName + ", UPEM=" + selectedFontUpem);
+
+                    if (Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+                        btnInjectApply.setEnabled(true);
+                    }
+                });
+
+            } catch (Exception e) {
+                log("[Error] 读取字体失败: " + e.getMessage());
+            }
+        });
+    }
+
+    private int parseTtfUpem(File file) {
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] header = new byte[12];
+            if (fis.read(header) < 12) return 0;
+            ByteBuffer bb = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN);
+            bb.getInt(); // sfntVersion
+            int numTables = bb.getShort() & 0xFFFF;
+
+            for (int i = 0; i < numTables; i++) {
+                byte[] entry = new byte[16];
+                if (fis.read(entry) < 16) break;
+                String tag = new String(entry, 0, 4);
+                if ("head".equals(tag)) {
+                    ByteBuffer entryBb = ByteBuffer.wrap(entry).order(ByteOrder.BIG_ENDIAN);
+                    entryBb.position(8);
+                    int offset = entryBb.getInt();
+
+                    // Read head table
+                    try (FileInputStream headFis = new FileInputStream(file)) {
+                        headFis.skip(offset + 18);
+                        byte[] upemBuf = new byte[2];
+                        if (headFis.read(upemBuf) == 2) {
+                            return ByteBuffer.wrap(upemBuf).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return 0;
+    }
+
+    private String calculateMd5(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("MD5");
+        try (InputStream is = new FileInputStream(file)) {
+            byte[] buffer = new byte[65536];
+            int read;
+            while ((read = is.read(buffer)) > 0) {
+                digest.update(buffer, 0, read);
+            }
+        }
+        byte[] md5sum = digest.digest();
+        StringBuilder sb = new StringBuilder();
+        for (byte b : md5sum) {
+            sb.append(String.format("%02x", b & 0xff));
+        }
+        return sb.toString();
+    }
+
+    private Process createShizukuProcess(String[] cmd) throws Exception {
+        java.lang.reflect.Method method = Shizuku.class.getDeclaredMethod("newProcess", String[].class, String[].class, String.class);
+        method.setAccessible(true);
+        return (Process) method.invoke(null, cmd, null, null);
+    }
+
+    private String runShizukuShell(String cmd) {
+        StringBuilder output = new StringBuilder();
+        try {
+            Process process = createShizukuProcess(new String[]{"sh", "-c", cmd});
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                }
+            }
+            process.waitFor();
+        } catch (Exception e) {
+            output.append("Error: ").append(e.getMessage());
+        }
+        return output.toString();
+    }
+
+    private void executeInjection() {
+        if (cachedFontFile == null || !cachedFontFile.exists()) {
+            Toast.makeText(this, "请先选择字体文件", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        btnInjectApply.setEnabled(false);
+        log("\n========== 开始 TOCTOU 注入 ==========");
+
+        executor.execute(() -> {
+            try {
+                // Step 1: Copy selected font to /data/local/tmp/app_font_inject.ttf
+                log("[1/6] 暂存字体文件至设备运行环境...");
+                String pushCmd = "cat > /data/local/tmp/app_font_inject.ttf && chmod 666 /data/local/tmp/app_font_inject.ttf";
+                Process pushProc = createShizukuProcess(new String[]{"sh", "-c", pushCmd});
+                try (FileInputStream fis = new FileInputStream(cachedFontFile);
+                     FileOutputStream pos = (FileOutputStream) pushProc.getOutputStream()) {
+                    byte[] buf = new byte[65536];
+                    int len;
+                    while ((len = fis.read(buf)) != -1) {
+                        pos.write(buf, 0, len);
+                    }
+                    pos.flush();
+                }
+                pushProc.waitFor();
+
+                // Step 2: Locate Theme Store DIY folder
+                log("[2/6] 定位主题商店 DIY 数据目录...");
+                String diyDirRes = runShizukuShell("ls -d /sdcard/Android/data/com.heytap.themestore/files/Themes/.data/temp/*/colorFonts 2>/dev/null").trim();
+                if (diyDirRes.isEmpty()) {
+                    log("[Error] 未找到主题商店 DIY 目录！请先在主题商店中下载或生成一款 DIY 字体。");
+                    mainHandler.post(() -> btnInjectApply.setEnabled(true));
+                    return;
+                }
+                String colorFontsDir = diyDirRes.split("\n")[0].trim();
+                String baseDiyDir = new File(colorFontsDir).getParent();
+                log("[ThemeStore] 基础目录: " + baseDiyDir);
+
+                // Step 3: Find target record file
+                log("[3/6] 查找当前有效的 DIY 记录模板...");
+                String recordsRes = runShizukuShell("ls -t " + colorFontsDir + "/*_colorFont_*.ttf 2>/dev/null").trim();
+                if (recordsRes.isEmpty()) {
+                    log("[Error] colorFonts 目录下无历史记录文件！");
+                    mainHandler.post(() -> btnInjectApply.setEnabled(true));
+                    return;
+                }
+                String targetRecord = recordsRes.split("\n")[0].trim();
+                String targetName = new File(targetRecord).getName();
+                log("[Target] 匹配记录文件: " + targetName);
+
+                // Step 4: Prepare atomic staging & inotifyd hook script
+                log("[4/6] 部署精确原子 Inode 竞态监听器...");
+                String script = "#!/system/bin/sh\n"
+                        + "DIR=\"" + baseDiyDir + "\"\n"
+                        + "COLOR_FONTS=\"$DIR/colorFonts\"\n"
+                        + "TARGET_NAME=\"" + targetName + "\"\n"
+                        + "TARGET=\"$COLOR_FONTS/$TARGET_NAME\"\n"
+                        + "ORIG=\"$DIR/.orig_backup_clean.ttf\"\n"
+                        + "SWAP_TMP=\"$COLOR_FONTS/.swap_ready.dat\"\n"
+                        + "input keyevent 4\n"
+                        + "sleep 0.4\n"
+                        + "pkill -f inotifyd 2>/dev/null\n"
+                        + "if [ ! -f \"$ORIG\" ]; then cp \"$TARGET\" \"$ORIG\"; fi\n"
+                        + "cp \"$ORIG\" \"$TARGET\"\n"
+                        + "cp /data/local/tmp/app_font_inject.ttf \"$SWAP_TMP\"\n"
+                        + "chmod 666 \"$TARGET\" \"$SWAP_TMP\"\n"
+                        + "rm -f /data/local/tmp/app_swap.log\n"
+                        + "/system/bin/inotifyd - \"$COLOR_FONTS:r\" | while read -r ev d f; do\n"
+                        + "    if [ \"$f\" = \"$TARGET_NAME\" ]; then\n"
+                        + "        COUNT=$((COUNT + 1))\n"
+                        + "        if [ \"$COUNT\" -eq 2 ]; then\n"
+                        + "            /system/bin/mv -f \"$SWAP_TMP\" \"$TARGET\"\n"
+                        + "            echo \"SWAPPED\" > /data/local/tmp/app_swap.log\n"
+                        + "        fi\n"
+                        + "    fi\n"
+                        + "done &\n"
+                        + "PIPE_PID=$!\n"
+                        + "sleep 0.3\n"
+                        + "input tap 1056 672\n"
+                        + "sleep 3.5\n"
+                        + "kill $PIPE_PID 2>/dev/null\n"
+                        + "pkill -f inotifyd 2>/dev/null\n"
+                        + "cp \"$ORIG\" \"$TARGET\"\n"
+                        + "chmod 666 \"$TARGET\"\n"
+                        + "rm -f \"$SWAP_TMP\"\n";
+
+                // Step 5: Execute script via Shizuku
+                log("[5/6] 触发无感替换流程...");
+                Process scriptProc = createShizukuProcess(new String[]{"sh", "-c", "cat > /data/local/tmp/run_app_inject.sh && chmod 755 /data/local/tmp/run_app_inject.sh && /data/local/tmp/run_app_inject.sh"});
+                try (FileOutputStream fos = (FileOutputStream) scriptProc.getOutputStream()) {
+                    fos.write(script.getBytes());
+                    fos.flush();
+                }
+                scriptProc.waitFor();
+
+                // Step 6: Verify system font
+                log("[6/6] 校验系统字体写入状态...");
+                String verifyRes = runShizukuShell("ls -la /data/format_unclear/font/Customized-Regular.ttf && md5sum /data/format_unclear/font/Customized-Regular.ttf");
+                log("[Result]\n" + verifyRes.trim());
+
+                boolean success = verifyRes.toLowerCase().contains(selectedFontMd5.toLowerCase());
+                mainHandler.post(() -> {
+                    btnInjectApply.setEnabled(true);
+                    refreshSystemFontInfo();
+                    if (success) {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("🎉 注入成功！")
+                                .setMessage("系统字体已成功替换为 " + selectedFontName + "！\n\nMD5: " + selectedFontMd5 + "\n大小: " + selectedFontSize + " 字节\n\n新字体已即刻生效，无需重启设备。")
+                                .setPositiveButton("太棒了", null)
+                                .show();
+                    } else {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("⚠️ 注入未完全对齐")
+                                .setMessage("系统字体 MD5 尚未与所选字体一致。\n\n提示：请确保主题商店已处于后台，或在主题商店“历史 DIY 记录”界面重试。")
+                                .setPositiveButton("知道了", null)
+                                .show();
+                    }
+                });
+
+            } catch (Exception e) {
+                log("[Fatal Error] " + e.getMessage());
+                mainHandler.post(() -> btnInjectApply.setEnabled(true));
+            }
+        });
+    }
+}
