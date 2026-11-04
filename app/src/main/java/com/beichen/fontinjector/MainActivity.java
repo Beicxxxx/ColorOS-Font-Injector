@@ -311,6 +311,61 @@ public class MainActivity extends AppCompatActivity {
         return output.toString();
     }
 
+    // Center (x,y) of the newest DIY record's "应用" button. The newest
+    // colorFont file (ls -t) is the top-most / left-most card, so return the
+    // first "应用" button in reading order.
+    private int[] findApplyButtonXY() {
+        try {
+            String xml = runShizukuShell("uiautomator dump /data/local/tmp/uidump.xml >/dev/null 2>&1; cat /data/local/tmp/uidump.xml");
+            java.util.regex.Matcher nm = java.util.regex.Pattern.compile("<node\\b[^>]*?>").matcher(xml);
+            java.util.regex.Pattern useId = java.util.regex.Pattern.compile("resource-id=\"[^\"]*/use\"");
+            java.util.regex.Pattern bounds = java.util.regex.Pattern.compile("bounds=\"\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]\"");
+            java.util.List<int[]> btns = new java.util.ArrayList<>();
+            while (nm.find()) {
+                String s = nm.group();
+                if (s.contains("content-desc=\"应用\"") || useId.matcher(s).find()) {
+                    java.util.regex.Matcher bm = bounds.matcher(s);
+                    if (bm.find()) {
+                        int x1 = Integer.parseInt(bm.group(1)), y1 = Integer.parseInt(bm.group(2));
+                        int x2 = Integer.parseInt(bm.group(3)), y2 = Integer.parseInt(bm.group(4));
+                        btns.add(new int[]{(x1 + x2) / 2, (y1 + y2) / 2});
+                    }
+                }
+            }
+            if (btns.isEmpty()) return null;
+            btns.sort((a, b) -> a[1] != b[1] ? a[1] - b[1] : a[0] - b[0]);
+            return btns.get(0);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // Bring the "历史 DIY 记录" page to the foreground, dismissing a leftover
+    // "-15 资源包已损坏" dialog or the apply-success H5 page.
+    private void ensureHistoryPage() {
+        for (int i = 0; i < 4; i++) {
+            String xml = runShizukuShell("uiautomator dump /data/local/tmp/uidump.xml >/dev/null 2>&1; cat /data/local/tmp/uidump.xml");
+            java.util.regex.Matcher nm = java.util.regex.Pattern.compile("<node\\b[^>]*?>").matcher(xml);
+            java.util.regex.Pattern bounds = java.util.regex.Pattern.compile("bounds=\"\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]\"");
+            while (nm.find()) {
+                String s = nm.group();
+                if (s.contains("text=\"知道了\"")) {
+                    java.util.regex.Matcher bm = bounds.matcher(s);
+                    if (bm.find()) {
+                        int x1 = Integer.parseInt(bm.group(1)), y1 = Integer.parseInt(bm.group(2));
+                        int x2 = Integer.parseInt(bm.group(3)), y2 = Integer.parseInt(bm.group(4));
+                        runShizukuShell("input tap " + ((x1 + x2) / 2) + " " + ((y1 + y2) / 2));
+                    }
+                    break;
+                }
+            }
+            String fg = runShizukuShell("dumpsys activity activities | grep topResumedActivity | head -1");
+            if (fg.contains("DiyFontHistoryActivity")) return;
+            runShizukuShell("input keyevent 4");
+            try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
+        }
+    }
+
     private void executeInjection() {
         if (cachedFontFile == null || !cachedFontFile.exists()) {
             Toast.makeText(this, "请先选择字体文件", Toast.LENGTH_SHORT).show();
@@ -361,57 +416,72 @@ public class MainActivity extends AppCompatActivity {
                 String targetName = new File(targetRecord).getName();
                 log("[Target] 匹配记录文件: " + targetName);
 
-                // Step 4: Prepare atomic staging & inotifyd hook script
-                log("[4/6] 部署精确原子 Inode 竞态监听器...");
-                String script = "#!/system/bin/sh\n"
-                        + "DIR=\"" + baseDiyDir + "\"\n"
-                        + "COLOR_FONTS=\"$DIR/colorFonts\"\n"
-                        + "TARGET_NAME=\"" + targetName + "\"\n"
-                        + "TARGET=\"$COLOR_FONTS/$TARGET_NAME\"\n"
-                        + "ORIG=\"$DIR/.orig_backup_clean.ttf\"\n"
-                        + "SWAP_TMP=\"$COLOR_FONTS/.swap_ready.dat\"\n"
-                        + "input keyevent 4\n"
-                        + "sleep 0.4\n"
-                        + "pkill -f inotifyd 2>/dev/null\n"
-                        + "if [ ! -f \"$ORIG\" ]; then cp \"$TARGET\" \"$ORIG\"; fi\n"
-                        + "cp \"$ORIG\" \"$TARGET\"\n"
-                        + "cp /data/local/tmp/app_font_inject.ttf \"$SWAP_TMP\"\n"
-                        + "chmod 666 \"$TARGET\" \"$SWAP_TMP\"\n"
-                        + "rm -f /data/local/tmp/app_swap.log\n"
-                        + "/system/bin/inotifyd - \"$COLOR_FONTS:r\" | while read -r ev d f; do\n"
-                        + "    if [ \"$f\" = \"$TARGET_NAME\" ]; then\n"
-                        + "        COUNT=$((COUNT + 1))\n"
-                        + "        if [ \"$COUNT\" -eq 2 ]; then\n"
-                        + "            /system/bin/mv -f \"$SWAP_TMP\" \"$TARGET\"\n"
-                        + "            echo \"SWAPPED\" > /data/local/tmp/app_swap.log\n"
-                        + "        fi\n"
-                        + "    fi\n"
-                        + "done &\n"
-                        + "PIPE_PID=$!\n"
-                        + "sleep 0.3\n"
-                        + "input tap 1056 672\n"
-                        + "sleep 3.5\n"
-                        + "kill $PIPE_PID 2>/dev/null\n"
-                        + "pkill -f inotifyd 2>/dev/null\n"
-                        + "cp \"$ORIG\" \"$TARGET\"\n"
-                        + "chmod 666 \"$TARGET\"\n"
-                        + "rm -f \"$SWAP_TMP\"\n";
+                // Step 4-6: TOCTOU apply, retried until the system font matches.
+                // Theme Store reads the whole record to validate its MD5 (many
+                // read events), closes it, then re-opens it to copy it into the
+                // system font path. Swap on the first close that follows a large
+                // read burst: validation sees the genuine file, the copy reads
+                // ours. Swapping on the "2nd open" is too late (that fd is
+                // already bound to the old inode). The window is ~30ms so the
+                // swap can lose the race; retry until it lands.
+                log("[4/6] 部署读取计数竞态监听器并触发替换（最多重试 6 次）...");
+                boolean applied = false;
+                String verifyRes = "";
+                for (int attempt = 1; attempt <= 6 && !applied; attempt++) {
+                    log("  尝试 " + attempt + "/6 ...");
+                    ensureHistoryPage();
+                    int[] xy = findApplyButtonXY();
+                    int tapX = (xy != null) ? xy[0] : 384;
+                    int tapY = (xy != null) ? xy[1] : 672;
 
-                // Step 5: Execute script via Shizuku
-                log("[5/6] 触发无感替换流程...");
-                Process scriptProc = createShizukuProcess(new String[]{"sh", "-c", "cat > /data/local/tmp/run_app_inject.sh && chmod 755 /data/local/tmp/run_app_inject.sh && /data/local/tmp/run_app_inject.sh"});
-                try (FileOutputStream fos = (FileOutputStream) scriptProc.getOutputStream()) {
-                    fos.write(script.getBytes());
-                    fos.flush();
+                    String script = "#!/system/bin/sh\n"
+                            + "COLOR_FONTS=\"" + colorFontsDir + "\"\n"
+                            + "TARGET_NAME=\"" + targetName + "\"\n"
+                            + "TARGET=\"$COLOR_FONTS/$TARGET_NAME\"\n"
+                            + "ORIG=\"/data/local/tmp/.orig_genuine.ttf\"\n"
+                            + "SWAP_TMP=\"$COLOR_FONTS/.swap_ready.dat\"\n"
+                            + "pkill -f inotifyd 2>/dev/null\n"
+                            + "cp \"$TARGET\" \"$ORIG\"\n"
+                            + "cp /data/local/tmp/app_font_inject.ttf \"$SWAP_TMP\"\n"
+                            + "chmod 666 \"$SWAP_TMP\" 2>/dev/null\n"
+                            + "reads=0\n"
+                            + "/system/bin/inotifyd - \"$TARGET:aw0r\" | while read -r ev path rest; do\n"
+                            + "    case \"$ev\" in\n"
+                            + "        *a*) reads=$((reads+1)) ;;\n"
+                            + "        *r*) reads=0 ;;\n"
+                            + "        *)\n"
+                            + "            if [ -z \"$DONE\" ] && [ \"${reads:-0}\" -gt 100 ]; then\n"
+                            + "                /system/bin/mv -f \"$SWAP_TMP\" \"$TARGET\"\n"
+                            + "                DONE=1\n"
+                            + "            fi\n"
+                            + "            reads=0 ;;\n"
+                            + "    esac\n"
+                            + "done &\n"
+                            + "PIPE_PID=$!\n"
+                            + "sleep 0.4\n"
+                            + "input tap " + tapX + " " + tapY + "\n"
+                            + "sleep 8\n"
+                            + "kill $PIPE_PID 2>/dev/null\n"
+                            + "pkill -f inotifyd 2>/dev/null\n"
+                            + "cp \"$ORIG\" \"$TARGET\" 2>/dev/null\n"
+                            + "rm -f \"$SWAP_TMP\"\n";
+
+                    Process scriptProc = createShizukuProcess(new String[]{"sh", "-c", "cat > /data/local/tmp/run_app_inject.sh && chmod 755 /data/local/tmp/run_app_inject.sh && /data/local/tmp/run_app_inject.sh"});
+                    try (FileOutputStream fos = (FileOutputStream) scriptProc.getOutputStream()) {
+                        fos.write(script.getBytes());
+                        fos.flush();
+                    }
+                    scriptProc.waitFor();
+
+                    verifyRes = runShizukuShell("md5sum /data/format_unclear/font/Customized-Regular.ttf");
+                    applied = verifyRes.toLowerCase().contains(selectedFontMd5.toLowerCase());
+                    log("  系统字体: " + verifyRes.trim());
                 }
-                scriptProc.waitFor();
 
-                // Step 6: Verify system font
                 log("[6/6] 校验系统字体写入状态...");
-                String verifyRes = runShizukuShell("ls -la /data/format_unclear/font/Customized-Regular.ttf && md5sum /data/format_unclear/font/Customized-Regular.ttf");
                 log("[Result]\n" + verifyRes.trim());
 
-                boolean success = verifyRes.toLowerCase().contains(selectedFontMd5.toLowerCase());
+                final boolean success = applied;
                 mainHandler.post(() -> {
                     btnInjectApply.setEnabled(true);
                     refreshSystemFontInfo();
