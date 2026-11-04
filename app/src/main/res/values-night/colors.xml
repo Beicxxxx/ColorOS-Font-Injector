@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material 3 dark color scheme (indigo seed). Fallback for pre-Android-12 /
+     non-dynamic-color; Material You overrides on Android 12+. -->
+<resources>
+    <color name="primary">#BBC3FF</color>
+    <color name="on_primary">#0E2878</color>
+    <color name="primary_container">#2C3F90</color>
+    <color name="on_primary_container">#DFE0FF</color>
+
+    <color name="secondary">#C2C4DD</color>
+    <color name="on_secondary">#2B2F42</color>
+    <color name="secondary_container">#414559</color>
+    <color name="on_secondary_container">#DEE0F9</color>
+
+    <color name="tertiary">#E3BAD7</color>
+    <color name="on_tertiary">#44263F</color>
+    <color name="tertiary_container">#5C3C56</color>
+    <color name="on_tertiary_container">#FFD7F3</color>
+
+    <color name="background">#121318</color>
+    <color name="on_background">#E3E1E9</color>
+    <color name="surface">#121318</color>
+    <color name="on_surface">#E3E1E9</color>
+    <color name="surface_variant">#45464F</color>
+    <color name="on_surface_variant">#C6C5D0</color>
+    <color name="surface_container">#1F1F25</color>
+    <color name="surface_container_high">#292A2F</color>
+
+    <color name="outline">#90909A</color>
+    <color name="outline_variant">#45464F</color>
+
+    <color name="error">#FFB4AB</color>
+    <color name="on_error">#690005</color>
+    <color name="error_container">#93000A</color>
+    <color name="on_error_container">#FFDAD6</color>
+
+    <color name="ok_green">#7FD99B</color>
+</resources>

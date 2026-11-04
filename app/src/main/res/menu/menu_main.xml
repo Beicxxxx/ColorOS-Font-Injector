@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/action_diy"
+        android:title="打开主题商店 DIY"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_shizuku"
+        android:title="打开 Shizuku"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_history"
+        android:title="历史记录"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_about"
+        android:title="使用说明"
+        app:showAsAction="never" />
+</menu>
