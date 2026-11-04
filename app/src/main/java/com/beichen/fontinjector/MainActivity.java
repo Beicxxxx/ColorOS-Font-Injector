@@ -256,6 +256,14 @@ public class MainActivity extends AppCompatActivity {
         }
         busy = true;
         log("\n========== 开始注入：" + item.name + " ==========");
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("去主题商店点【应用】")
+                .setMessage("监听即将就绪（约 120 秒）。请打开『主题商店 → 历史 DIY 记录』，"
+                        + "点你要的那条记录的【应用】；没成功可多点几次，命中即自动完成。\n\n"
+                        + "本应用全程不会自动点击或切屏。")
+                .setPositiveButton("打开主题商店", (d, w) -> launch("com.heytap.themestore", "未安装主题商店"))
+                .setNegativeButton("我自己开", null)
+                .show();
         executor.execute(() -> {
             File file = FontLibrary.ensureLocal(this, item);
             if (file == null) {
@@ -279,8 +287,8 @@ public class MainActivity extends AppCompatActivity {
                             .setTitle(success ? "🎉 注入成功" : "⚠️ 注入未对齐")
                             .setMessage(success
                                     ? "系统字体已替换为 " + item.name + "，无需重启。\n\n" + systemInfo
-                                    : "系统字体 MD5 与所选字体不一致。\n\n请确认主题商店已有 DIY 字体记录，"
-                                      + "并确保执行时主题商店处在该 DIY 字体页面上后重试。")
+                                    : "本轮未命中。\n\n请确认已在主题商店『历史 DIY 记录』页点了【应用】；"
+                                      + "若窗口已过，再点一次「应用」重新挂监听即可。")
                             .setPositiveButton("好", null)
                             .show();
                 }

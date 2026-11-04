@@ -11,18 +11,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * TOCTOU 注入。
+ * 半自动注入：App 只负责「挂监听」，真正的「应用」由用户在主题商店里手动点。
  *
- * 点「应用」后主题商店会先读满整份 DIY 记录文件算 MD5（数百个 read 事件）再关闭，
- * 校验通过后文件被再次打开、由系统服务拷进受 SELinux 保护的
- * /data/format_unclear/font/Customized-Regular.ttf。我们在「读满后的第一个关闭」
- * 这一毫秒级窗口里 mv -f 换入自定义字体：校验读到的是正版，拷贝读到的是我们的字体。
- *
- * 整套编排（拉回主题商店 DIY 历史页、识别「应用」按钮、换文件、重试）由一个经
- * Shizuku 运行的自包含脚本完成。该脚本是 shizuku_server 的子进程、不是本 App 的
- * 子进程，所以即便 ColorOS 在 App 退到后台时把它杀掉，脚本仍会跑完并把结果写入
- * 结果文件。换文件绝不能卡在「第 2 次 open」——那次 open 的 fd 已绑定旧 inode，
- * 为时已晚；窗口只有约 30ms，偶尔抢不到会自动重试。
+ * 为什么不自动点：自动点依赖屏幕坐标（识别的是位置不是控件），换机型、甚至同机型
+ * 不同 DPI 都会点偏；而且脚本跑在 shizuku_server 下、独立于 App，一旦自动点+返回+
+ * 重试就会和用户抢屏幕、杀 App 也停不掉。所以这里脚本**全程不执行 input tap /
+ * keyevent / uiautomator、不做任何导航**，只用 inotifyd 监听记录文件，在校验读满后的
+ * 关闭瞬间把暂存字体 mv 换上。约 120 秒内每轮自动重挂并把记录还原成正版，用户在
+ * 主题商店点几次「应用」都能被接住，命中目标 MD5 即成功、随后还原记录。
  */
 final class Injector {
 
@@ -33,6 +29,7 @@ final class Injector {
     }
 
     static final String RESULT_FILE = "/data/local/tmp/app_inject_result.txt";
+    static final int WINDOW_SECONDS = 120;
 
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
@@ -46,8 +43,7 @@ final class Injector {
     private static void run(Context ctx, File font, String fontName, Callback cb) {
         String fontMd5 = TtfUtil.md5(font).toLowerCase();
         try {
-            // Step 1: 暂存字体到 /data/local/tmp
-            log(cb, "[1/5] 暂存字体文件至设备运行环境...");
+            log(cb, "[1/4] 暂存字体文件至设备运行环境...");
             Process pushProc = Shell.process(
                     "cat > /data/local/tmp/app_font_inject.ttf && chmod 666 /data/local/tmp/app_font_inject.ttf");
             try (FileInputStream fis = new FileInputStream(font);
@@ -59,8 +55,7 @@ final class Injector {
             }
             pushProc.waitFor();
 
-            // Step 2: 定位主题商店 DIY 目录
-            log(cb, "[2/5] 定位主题商店 DIY 数据目录...");
+            log(cb, "[2/4] 定位主题商店 DIY 数据目录...");
             String diyDirRes = Shell.run("ls -d " + FontLibrary.THEME_TMP + "/*/colorFonts 2>/dev/null").trim();
             if (diyDirRes.isEmpty()) {
                 log(cb, "[错误] 未找到主题商店 DIY 目录！请先在主题商店生成一款 DIY 字体。");
@@ -69,8 +64,7 @@ final class Injector {
             }
             String colorFontsDir = diyDirRes.split("\n")[0].trim();
 
-            // Step 3: 找当前有效的 DIY 记录模板（最新一条）
-            log(cb, "[3/5] 查找当前有效的 DIY 记录模板...");
+            log(cb, "[3/4] 查找当前有效的 DIY 记录模板（最新一条）...");
             String recordsRes = Shell.run("ls -t " + colorFontsDir + "/*_colorFont_*.ttf 2>/dev/null").trim();
             if (recordsRes.isEmpty()) {
                 log(cb, "[错误] colorFonts 目录下无历史记录文件！请先在主题商店生成一条 DIY 记录。");
@@ -78,31 +72,30 @@ final class Injector {
                 return;
             }
             String targetName = new File(recordsRes.split("\n")[0].trim()).getName();
-            log(cb, "[目标] 记录文件: " + targetName);
 
-            // Step 4: 启动自包含注入脚本（由 Shizuku 托管，独立于本 App 的生死）
-            log(cb, "[4/5] 启动自包含注入脚本（商店会被拉到前台，本应用可能短暂退到后台）...");
+            log(cb, "[4/4] 监听已就绪（约 " + WINDOW_SECONDS + " 秒）。");
+            log(cb, "➡ 请打开『主题商店 → 历史 DIY 记录』，点你要的那条记录的【应用】。");
+            log(cb, "   没成功可在这 " + WINDOW_SECONDS + " 秒内多点几次，命中即自动完成。");
+
             String script = buildScript(colorFontsDir, targetName, fontMd5);
             Shell.run("rm -f " + RESULT_FILE);
             Process scriptProc = Shell.process(
-                    "cat > /data/local/tmp/run_app_inject.sh && chmod 755 /data/local/tmp/run_app_inject.sh && /data/local/tmp/run_app_inject.sh");
+                    "cat > /data/local/tmp/run_app_watch.sh && chmod 755 /data/local/tmp/run_app_watch.sh && /data/local/tmp/run_app_watch.sh");
             try (FileOutputStream fos = (FileOutputStream) scriptProc.getOutputStream()) {
                 fos.write(script.getBytes("UTF-8"));
                 fos.flush();
             }
 
-            // Step 5: 轮询结果文件。脚本独立于本 App，被杀也会写完结果。
-            log(cb, "[5/5] 等待注入结果（最多重试 6 次）...");
             String result = "";
-            for (int i = 0; i < 65; i++) {
+            for (int i = 0; i < WINDOW_SECONDS / 2 + 10; i++) {
                 Thread.sleep(2000);
                 result = Shell.run("cat " + RESULT_FILE + " 2>/dev/null").trim();
-                if (result.startsWith("SUCCESS") || result.startsWith("FAILED")) break;
+                if (result.startsWith("SUCCESS") || result.startsWith("TIMEOUT")) break;
             }
             try { scriptProc.destroy(); } catch (Exception ignored) {}
 
             boolean success = result.startsWith("SUCCESS");
-            if (success || result.startsWith("FAILED")) {
+            if (success || result.startsWith("TIMEOUT")) {
                 Shell.run("rm -f " + RESULT_FILE);
             }
             String verifyRes = Shell.run(
@@ -110,7 +103,7 @@ final class Injector {
             log(cb, "[结果] " + result);
             log(cb, verifyRes);
             log(cb, success ? "✅ 系统字体 MD5 已匹配：" + fontName
-                            : "⚠️ 系统字体 MD5 未匹配（窗口竞态或记录不一致），可重试或新建 DIY 记录");
+                            : "⚠️ 本轮未命中。请确认已在主题商店 DIY 记录页点了【应用】，然后再点一次「应用」重试。");
             finish(cb, success, verifyRes);
 
             History.Entry e = new History.Entry();
@@ -128,8 +121,9 @@ final class Injector {
     }
 
     /**
-     * 自包含编排脚本：拉回 DIY 历史页 → 关 -15 弹框 → 识别「应用」按钮 →
-     * 读计数换文件 → 点击 → 重试 → 写结果文件。整段在 shizuku_server 下运行。
+     * 纯监听脚本：不执行 input/keyevent/uiautomator、不做任何导航。
+     * 约 120 秒内每轮：还原记录为正版 → 暂存自定义字体 → 挂 inotifyd →
+     * 在「读满（>100 次读）后的第一个关闭」处 mv 换入 → 等系统字体 MD5 命中。
      */
     private static String buildScript(String colorFontsDir, String targetName, String wantMd5) {
         return "#!/system/bin/sh\n"
@@ -139,53 +133,38 @@ final class Injector {
                 + "ORIG=/data/local/tmp/.orig_genuine.ttf\n"
                 + "SWAP=\"$COLOR_FONTS/.swap_ready.dat\"\n"
                 + "SYS=" + FontLibrary.SYS_FONT + "\n"
-                + "UIXML=/data/local/tmp/app_ui.xml\n"
                 + "RESULT=" + RESULT_FILE + "\n"
                 + "WANT=\"" + wantMd5 + "\"\n"
                 + "echo RUNNING > \"$RESULT\"\n"
                 + "pkill -f inotifyd 2>/dev/null\n"
                 + "cp \"$TARGET\" \"$ORIG\" 2>/dev/null\n"
-                + "attempt=0\n"
-                + "while [ \"$attempt\" -lt 6 ]; do\n"
-                + "  attempt=$((attempt+1))\n"
-                + "  j=0\n"
-                + "  while [ \"$j\" -lt 6 ]; do\n"
-                + "    FG=$(dumpsys activity activities | grep topResumedActivity | head -1)\n"
-                + "    case \"$FG\" in *DiyFontHistoryActivity*) break;; esac\n"
-                + "    uiautomator dump \"$UIXML\" >/dev/null 2>&1\n"
-                + "    if grep -q \"知道了\" \"$UIXML\" 2>/dev/null; then\n"
-                + "      DB=$(grep -oE 'text=\"知道了\"[^>]*bounds=\"\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]\"' \"$UIXML\" | head -1)\n"
-                + "      set -- $(echo \"$DB\" | grep -oE '[0-9]+' | tail -4)\n"
-                + "      [ \"$#\" -ge 4 ] && input tap $(( ($1+$3)/2 )) $(( ($2+$4)/2 ))\n"
-                + "    fi\n"
-                + "    input keyevent 4\n"
-                + "    sleep 1.5\n"
-                + "    j=$((j+1))\n"
-                + "  done\n"
-                + "  uiautomator dump \"$UIXML\" >/dev/null 2>&1\n"
-                + "  LINE=$(grep -oE 'resource-id=\"[^\"]*/use\"[^>]*bounds=\"\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]\"' \"$UIXML\" | head -1)\n"
-                + "  set -- $(echo \"$LINE\" | grep -oE '[0-9]+' | tail -4)\n"
-                + "  if [ \"$#\" -ge 4 ]; then TX=$(( ($1+$3)/2 )); TY=$(( ($2+$4)/2 )); else TX=384; TY=672; fi\n"
+                + "END=$(( $(date +%s) + " + WINDOW_SECONDS + " ))\n"
+                + "while [ \"$(date +%s)\" -lt \"$END\" ]; do\n"
+                + "  cp \"$ORIG\" \"$TARGET\" 2>/dev/null\n"
                 + "  cp \"$NEW\" \"$SWAP\"; chmod 666 \"$SWAP\" 2>/dev/null\n"
                 + "  reads=0; DONE=\n"
                 + "  /system/bin/inotifyd - \"$TARGET:aw0r\" | while read -r ev p r; do\n"
                 + "    case \"$ev\" in\n"
                 + "      *a*) reads=$((reads+1)) ;;\n"
                 + "      *r*) reads=0 ;;\n"
-                + "      *) if [ -z \"$DONE\" ] && [ \"${reads:-0}\" -gt 100 ]; then /system/bin/mv -f \"$SWAP\" \"$TARGET\"; DONE=1; fi; reads=0 ;;\n"
+                + "      *) if [ -z \"$DONE\" ] && [ \"${reads:-0}\" -gt 100 ]; then /system/bin/mv -f \"$SWAP\" \"$TARGET\"; DONE=1; exit 0; fi; reads=0 ;;\n"
                 + "    esac\n"
                 + "  done &\n"
-                + "  PID=$!\n"
-                + "  sleep 0.4\n"
-                + "  input tap \"$TX\" \"$TY\"\n"
-                + "  sleep 8\n"
-                + "  kill \"$PID\" 2>/dev/null; pkill -f inotifyd 2>/dev/null\n"
-                + "  cp \"$ORIG\" \"$TARGET\" 2>/dev/null; rm -f \"$SWAP\"\n"
-                + "  set -- $(md5sum \"$SYS\")\n"
-                + "  if [ \"$1\" = \"$WANT\" ]; then echo \"SUCCESS $1\" > \"$RESULT\"; exit 0; fi\n"
+                + "  WPID=$!\n"
+                + "  j=0\n"
+                + "  while [ \"$j\" -lt 15 ]; do\n"
+                + "    sleep 1\n"
+                + "    set -- $(md5sum \"$SYS\" 2>/dev/null); [ \"$1\" = \"$WANT\" ] && break\n"
+                + "    j=$((j+1))\n"
+                + "  done\n"
+                + "  sleep 1\n"
+                + "  kill \"$WPID\" 2>/dev/null; pkill -f inotifyd 2>/dev/null\n"
+                + "  set -- $(md5sum \"$SYS\" 2>/dev/null)\n"
+                + "  if [ \"$1\" = \"$WANT\" ]; then cp \"$ORIG\" \"$TARGET\" 2>/dev/null; rm -f \"$SWAP\"; echo \"SUCCESS $1\" > \"$RESULT\"; exit 0; fi\n"
                 + "done\n"
-                + "set -- $(md5sum \"$SYS\")\n"
-                + "echo \"FAILED $1\" > \"$RESULT\"\n";
+                + "cp \"$ORIG\" \"$TARGET\" 2>/dev/null; rm -f \"$SWAP\"\n"
+                + "set -- $(md5sum \"$SYS\" 2>/dev/null)\n"
+                + "echo \"TIMEOUT $1\" > \"$RESULT\"\n";
     }
 
     private static void log(Callback cb, String line) {
