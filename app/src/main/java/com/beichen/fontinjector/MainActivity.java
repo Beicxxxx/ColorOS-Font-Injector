@@ -58,6 +58,7 @@ public class MainActivity extends AppCompatActivity {
     private final List<FontLibrary.Item> items = new ArrayList<>();
     private FontAdapter adapter;
     private boolean busy;
+    private volatile boolean resumed;
 
     private final Shizuku.OnRequestPermissionResultListener permissionListener =
             (requestCode, grantResult) -> {
@@ -248,6 +249,48 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumed = true;
+        // 若注入在本 App 退后台（甚至被 ColorOS 杀掉）后才完成，脚本会把结果写进
+        // RESULT_FILE。重新回到前台时在此补一次结算：复位 busy、刷新、提示结果。
+        executor.execute(() -> {
+            try {
+                if (!shellReady()) return;
+                String r = Shell.run("cat " + Injector.RESULT_FILE + " 2>/dev/null").trim();
+                if (r.startsWith("SUCCESS") || r.startsWith("TIMEOUT") || r.startsWith("DIRTY")) {
+                    Shell.run("rm -f " + Injector.RESULT_FILE);
+                    final boolean ok = r.startsWith("SUCCESS");
+                    final boolean dirty = r.startsWith("DIRTY");
+                    mainHandler.post(() -> {
+                        busy = false;
+                        refreshSystemFontInfo();
+                        showResult(ok, ok ? "系统字体已替换，无需重启。"
+                                          : dirty ? "这条 DIY 记录已被弄脏，注入会恒失败。请到主题商店重新生成一条 DIY 字体记录后再试。"
+                                          : "本轮未命中。可再点一次「应用」重新挂监听后，到主题商店点【应用】。");
+                    });
+                }
+            } catch (Exception ignored) {}
+        });
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        resumed = false;
+    }
+
+    /** 仅在 Activity 处于前台且未销毁时弹结果对话框，避免后台/已销毁时 BadTokenException。 */
+    private void showResult(boolean ok, String message) {
+        if (isFinishing() || isDestroyed()) return;
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(ok ? "🎉 注入成功" : "⚠️ 未命中")
+                .setMessage(message)
+                .setPositiveButton("好", null)
+                .show();
+    }
+
     private void applyFont(FontLibrary.Item item) {
         if (busy) return;
         if (!shellReady()) {
@@ -255,7 +298,8 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         busy = true;
-        log("\n========== 开始注入：" + item.name + " ==========");
+        String label = item.label();
+        log("\n========== 开始注入：" + label + " ==========");
         new MaterialAlertDialogBuilder(this)
                 .setTitle("去主题商店点【应用】")
                 .setMessage("监听即将就绪（约 120 秒）。请打开『主题商店 → 历史 DIY 记录』，"
@@ -273,7 +317,7 @@ public class MainActivity extends AppCompatActivity {
                 });
                 return;
             }
-            Injector.apply(this, file, item.name, new Injector.Callback() {
+            Injector.apply(this, file, label, new Injector.Callback() {
                 @Override
                 public void onLog(String line) {
                     log(line);
@@ -286,7 +330,7 @@ public class MainActivity extends AppCompatActivity {
                     new MaterialAlertDialogBuilder(MainActivity.this)
                             .setTitle(success ? "🎉 注入成功" : "⚠️ 注入未对齐")
                             .setMessage(success
-                                    ? "系统字体已替换为 " + item.name + "，无需重启。\n\n" + systemInfo
+                                    ? "系统字体已替换为 " + label + "，无需重启。\n\n" + systemInfo
                                     : "本轮未命中。\n\n请确认已在主题商店『历史 DIY 记录』页点了【应用】；"
                                       + "若窗口已过，再点一次「应用」重新挂监听即可。")
                             .setPositiveButton("好", null)
@@ -301,10 +345,11 @@ public class MainActivity extends AppCompatActivity {
                 + "\n大小：" + TtfUtil.size(item.size)
                 + (item.upem > 0 ? "\nUPM：" + item.upem : "")
                 + (item.family.isEmpty() ? "" : "\n家族名：" + item.family)
+                + "\n文件名：" + item.name
                 + "\n路径：" + item.path;
         // AlertDialog 不支持 message + setItems 同时展示，三个动作直接用三个按钮
         new MaterialAlertDialogBuilder(this)
-                .setTitle(item.name)
+                .setTitle(item.label())
                 .setMessage(meta)
                 .setPositiveButton("应用", (d, w) -> applyFont(item))
                 .setNeutralButton("保存", (d, w) -> exportFont(item))
@@ -366,7 +411,7 @@ public class MainActivity extends AppCompatActivity {
                             + "Themes/.data/temp/<id>/colorFonts/ 下已有 *_colorFont_*.ttf 记录。\n"
                             + "3. 回到本应用，导入或从字体库选字体 → 应用；注入期间会自动点主题商店的"
                             + "「应用」按钮（坐标按机型写死）。\n"
-                            + "4. 改 UPEM / 缩放 / 假粗 / CFF 转 TTF 请先用 fontctl 处理好再导入。\n\n"
+                            + "4. 改 UPEM / 缩放 / 假粗 / CFF 转 TTF 请先用项目的 skill/scripts/scale_upem.py 处理好再导入。\n\n"
                             + "提示：注入前记得先备份系统字体，出问题可在历史里回滚。")
                     .setPositiveButton("知道了", null)
                     .show();
@@ -419,9 +464,11 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onBindViewHolder(@NonNull VH holder, int position) {
             FontLibrary.Item item = items.get(position);
-            holder.name.setText(item.name);
+            holder.name.setText(item.label());
             String meta = item.source + " · " + TtfUtil.size(item.size)
-                    + (item.upem > 0 ? String.format(Locale.US, " · UPM %d", item.upem) : "");
+                    + (item.upem > 0 ? String.format(Locale.US, " · UPM %d", item.upem) : "")
+                    // 显示名来自字体内部表时，副标题带上文件名便于区分
+                    + (item.display.isEmpty() ? "" : " · " + item.name);
             holder.meta.setText(meta);
             holder.apply.setOnClickListener(v -> applyFont(item));
             holder.itemView.setOnClickListener(v -> showFontActions(item));
