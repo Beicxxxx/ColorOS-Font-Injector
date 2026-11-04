@@ -179,7 +179,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="点击后后台将启动原子 TOCTOU 监控，并自动拉起主题商店 DIY 记录页；你只需在主题商店里轻点一次【应用】，或由本应用自动点击即可完成无感写入！"
+                        android:text="注入前：请先在【主题商店】打开到「历史 DIY 记录」页（能看到带【应用】按钮的记录卡），再回到本应用点此。\n点击后，本应用会经 Shizuku 启动自包含脚本：自动返回该页、识别并点击【应用】、在 MD5 校验通过的瞬间原子换入你的字体，失败会自动重试。过程中本应用可能短暂退到后台（已不会闪退），完成后弹窗提示结果。"
                         android:textColor="?android:attr/textColorSecondary"
                         android:textSize="12sp" />
 
