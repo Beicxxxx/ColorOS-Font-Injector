@@ -3,6 +3,7 @@ package com.beichen.fontinjector;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
@@ -19,6 +20,11 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -78,6 +84,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        applyWindowInsets();
 
         tvShizukuStatus = findViewById(R.id.tv_shizuku_status);
         btnReqShizuku = findViewById(R.id.btn_req_shizuku);
@@ -118,6 +125,22 @@ public class MainActivity extends AppCompatActivity {
                 tvLogs.scrollTo(0, scrollAmount);
             }
         });
+    }
+
+    // targetSdk 35+ 在 Android 15/16 强制 edge-to-edge，必须自己让开状态栏/导航栏
+    private void applyWindowInsets() {
+        View root = findViewById(R.id.root);
+        ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
+            Insets bars = insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return insets;
+        });
+        boolean night = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), root);
+        controller.setAppearanceLightStatusBars(!night);
+        controller.setAppearanceLightNavigationBars(!night);
     }
 
     private void checkShizukuStatus() {
