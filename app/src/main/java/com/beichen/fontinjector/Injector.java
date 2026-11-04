@@ -49,6 +49,13 @@ final class Injector {
     private static void run(Context ctx, File font, String fontName, Callback cb) {
         String fontMd5 = TtfUtil.md5(font).toLowerCase();
         try {
+            // 防重入：先清掉上一轮可能仍在 shizuku_server 下运行的监听脚本。
+            // 脚本独立于本 App、App 被杀也不停；反复「应用」会累积多个并发监听，
+            // 互相抢同一条记录导致恒 TIMEOUT。先 TERM（让其 trap 还原记录）再 KILL 收尾。
+            // 扫 /proc/*/cmdline 并排除自身 $$（toybox pkill -f 按子串匹配会误杀本命令）。
+            log(cb, "[准备] 清理上一轮可能残留的监听...");
+            cleanupStaleWatchers();
+
             log(cb, "[1/4] 暂存字体文件至设备运行环境...");
             Process pushProc = Shell.process(
                     "cat > /data/local/tmp/app_font_inject.ttf && chmod 666 /data/local/tmp/app_font_inject.ttf");
@@ -175,6 +182,27 @@ final class Injector {
                 + "set -- $(md5sum \"$SYS\" 2>/dev/null)\n"
                 + "echo \"TIMEOUT $1\" > \"$RESULT\"\n"
                 + "exit 0\n";
+    }
+
+    /**
+     * 杀掉上一轮可能仍在运行的监听脚本及其 inotifyd，防止并发抢记录。
+     * 排除本命令自身（$$）；先 TERM 触发脚本 trap 还原记录，再 KILL 收尾。
+     */
+    private static void cleanupStaleWatchers() {
+        String term = "SELF=$$; for d in /proc/[0-9]*; do pid=${d#/proc/}; "
+                + "[ \"$pid\" = \"$SELF\" ] && continue; "
+                + "grep -qa run_app_watch \"$d/cmdline\" 2>/dev/null && kill -TERM \"$pid\" 2>/dev/null; done";
+        String kill = "SELF=$$; for d in /proc/[0-9]*; do pid=${d#/proc/}; "
+                + "[ \"$pid\" = \"$SELF\" ] && continue; "
+                + "grep -qa run_app_watch \"$d/cmdline\" 2>/dev/null && kill -9 \"$pid\" 2>/dev/null; done; "
+                + "pkill -9 inotifyd 2>/dev/null";
+        Shell.run(term);
+        try {
+            Thread.sleep(1200);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        Shell.run(kill);
     }
 
     private static void log(Callback cb, String line) {
