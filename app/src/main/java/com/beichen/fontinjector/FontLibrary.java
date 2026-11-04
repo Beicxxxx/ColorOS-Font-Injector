@@ -22,13 +22,18 @@ final class FontLibrary {
     static final String DOWNLOAD = "/sdcard/Download";
 
     static final class Item {
-        String name;
+        String name;        // 文件名（身份/缓存键，勿当显示名）
+        String display = "";// 字体内部名（列表主标题，空则回退文件名）
         String source;      // 导入 / DIY / 下载
         String path;        // 本地绝对路径，或设备上的路径
         boolean local;
         long size;
         int upem;
         String family = "";
+
+        String label() {
+            return (display == null || display.isEmpty()) ? name : display;
+        }
     }
 
     private FontLibrary() {}
@@ -76,6 +81,7 @@ final class FontLibrary {
         TtfUtil.Meta m = TtfUtil.read(f);
         it.upem = m.upem;
         it.family = m.family;
+        it.display = m.display;
         return it;
     }
 
@@ -94,6 +100,10 @@ final class FontLibrary {
             it.size = Long.parseLong(p[4]);
         } catch (Exception ignored) {
         }
+        TtfUtil.Meta m = TtfUtil.readRemote(path);
+        it.upem = m.upem;
+        it.family = m.family;
+        it.display = m.display;
         return it;
     }
 

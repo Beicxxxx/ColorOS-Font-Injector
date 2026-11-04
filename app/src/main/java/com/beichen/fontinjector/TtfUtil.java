@@ -1,10 +1,12 @@
 package com.beichen.fontinjector;
 
+import android.util.Base64;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
 
@@ -15,92 +17,161 @@ final class TtfUtil {
         int upem;
         int weight;
         String family = "";
+        String display = "";   // 字体内部名：优先全名(nameID=4)，退家族名(nameID=1[+2])
         boolean cff;
     }
 
     private TtfUtil() {}
 
-    static Meta read(File file) {
-        Meta m = new Meta();
-        try (FileInputStream fis = new FileInputStream(file)) {
-            byte[] head = new byte[12];
-            if (fis.read(head) < 12) return m;
-            ByteBuffer bb = ByteBuffer.wrap(head).order(ByteOrder.BIG_ENDIAN);
-            bb.getInt();
-            int numTables = bb.getShort() & 0xFFFF;
-            int headOff = -1, os2Off = -1, nameOff = -1;
-            for (int i = 0; i < numTables; i++) {
-                byte[] rec = new byte[16];
-                if (fis.read(rec) < 16) break;
-                String tag = new String(rec, 0, 4);
-                int off = ByteBuffer.wrap(rec).order(ByteOrder.BIG_ENDIAN).getInt(8);
-                switch (tag) {
-                    case "head": headOff = off; break;
-                    case "OS/2": os2Off = off; break;
-                    case "name": nameOff = off; break;
-                    case "CFF ": m.cff = true; break;
-                    default: break;
-                }
+    /** 字节源：本地文件随机读，或设备远程文件按段读（dd+base64）。 */
+    private interface Src {
+        byte[] read(int off, int len);
+    }
+
+    private static final class LocalSrc implements Src {
+        private final File f;
+        LocalSrc(File f) { this.f = f; }
+        public byte[] read(int off, int len) {
+            if (len <= 0 || off < 0) return len == 0 ? new byte[0] : null;
+            try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+                long total = raf.length();
+                if (off >= total) return null;
+                int n = (int) Math.min(len, total - off);
+                raf.seek(off);
+                byte[] buf = new byte[n];
+                raf.readFully(buf);
+                return buf;
+            } catch (Exception e) {
+                return null;
             }
-            if (headOff >= 0) {
-                ByteBuffer b = readAt(fis, headOff, 20);
-                if (b != null) m.upem = b.getShort(18) & 0xFFFF;
-            }
-            if (os2Off >= 0) {
-                ByteBuffer b = readAt(fis, os2Off, 6);
-                if (b != null) m.weight = b.getShort(4) & 0xFFFF;
-            }
-            if (nameOff >= 0) m.family = readFamily(fis, nameOff);
-        } catch (Exception ignored) {
         }
+    }
+
+    private static final class RemoteSrc implements Src {
+        private final String path;
+        RemoteSrc(String path) { this.path = path; }
+        public byte[] read(int off, int len) {
+            if (len <= 0 || off < 0) return len == 0 ? new byte[0] : null;
+            String b64 = Shell.run("dd if='" + path + "' bs=1 skip=" + off
+                    + " count=" + len + " 2>/dev/null | base64 -w0").trim();
+            if (b64.isEmpty()) return null;
+            try {
+                return Base64.decode(b64, Base64.DEFAULT);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+    }
+
+    static Meta read(File file) {
+        return parse(new LocalSrc(file));
+    }
+
+    /** 远程字体（DIY/下载）：不整文件拉取，只按偏移读 header/目录/name 表三段。 */
+    static Meta readRemote(String path) {
+        return parse(new RemoteSrc(path));
+    }
+
+    private static Meta parse(Src s) {
+        Meta m = new Meta();
+        byte[] head = s.read(0, 12);
+        if (head == null || head.length < 12) return m;
+        int numTables = u16(head, 4);
+        if (numTables <= 0 || numTables > 4096) return m;
+        byte[] dir = s.read(12, numTables * 16);
+        if (dir == null) return m;
+        int headOff = -1, os2Off = -1, nameOff = -1, nameLen = 0;
+        for (int i = 0; i < numTables; i++) {
+            int b = i * 16;
+            if (b + 16 > dir.length) break;
+            String tag = new String(dir, b, 4, StandardCharsets.ISO_8859_1);
+            int off = i32(dir, b + 8);
+            int len = i32(dir, b + 12);
+            switch (tag) {
+                case "head": headOff = off; break;
+                case "OS/2": os2Off = off; break;
+                case "name": nameOff = off; nameLen = len; break;
+                case "CFF ": m.cff = true; break;
+                default: break;
+            }
+        }
+        if (headOff >= 0) {
+            byte[] b = s.read(headOff, 20);
+            if (b != null && b.length >= 20) m.upem = u16(b, 18);
+        }
+        if (os2Off >= 0) {
+            byte[] b = s.read(os2Off, 6);
+            if (b != null && b.length >= 6) m.weight = u16(b, 4);
+        }
+        if (nameOff >= 0) parseName(s, nameOff, nameLen, m);
         return m;
     }
 
-    private static ByteBuffer readAt(FileInputStream fis, int offset, int len) {
-        try {
-            fis.getChannel().position(offset);
-            byte[] buf = new byte[len];
-            int read = fis.read(buf);
-            if (read <= 0) return null;
-            return ByteBuffer.wrap(buf).order(ByteOrder.BIG_ENDIAN);
-        } catch (Exception e) {
-            return null;
+    /** 解析 name 表：按平台/语言打分，取最合适的 全名(4) / 家族(1) / 子族(2)。 */
+    private static void parseName(Src s, int nameOff, int nameLen, Meta m) {
+        byte[] nt = s.read(nameOff, nameLen);
+        if (nt == null || nt.length < 6) return;
+        int count = u16(nt, 2);
+        int strOff = u16(nt, 4);
+        int[] bestRank = new int[5];   // 下标用 nameID：1,2,4
+        String[] bestVal = new String[5];
+        for (int i = 0; i < count; i++) {
+            int b = 6 + i * 12;
+            if (b + 12 > nt.length) break;
+            int platform = u16(nt, b);
+            int lang = u16(nt, b + 4);
+            int nameId = u16(nt, b + 6);
+            int length = u16(nt, b + 8);
+            int offset = u16(nt, b + 10);
+            if (nameId != 1 && nameId != 2 && nameId != 4) continue;
+            int sOff = strOff + offset;
+            if (sOff < 0 || sOff + length > nt.length) continue;
+            String val = decode(platform, nt, sOff, length).replace("\u0000", "").trim();
+            if (val.isEmpty()) continue;
+            int r = rank(platform, lang);
+            if (r > bestRank[nameId]) {
+                bestRank[nameId] = r;
+                bestVal[nameId] = val;
+            }
+        }
+        String full = bestVal[4], fam = bestVal[1], sub = bestVal[2];
+        m.family = fam != null ? fam : "";
+        if (full != null) {
+            m.display = full;
+        } else if (fam != null) {
+            m.display = (sub != null && !sub.equalsIgnoreCase("regular")) ? fam + " " + sub : fam;
+        } else {
+            m.display = "";
         }
     }
 
-    /** name 表里取 nameID=1（家族名），优先 Windows/Unicode 平台。 */
-    private static String readFamily(FileInputStream fis, int nameOff) {
+    private static String decode(int platform, byte[] buf, int off, int len) {
         try {
-            ByteBuffer head = readAt(fis, nameOff, 6);
-            if (head == null) return "";
-            int count = head.getShort(2) & 0xFFFF;
-            int stringOff = head.getShort(4) & 0xFFFF;
-            String fallback = "";
-            for (int i = 0; i < count; i++) {
-                ByteBuffer rec = readAt(fis, nameOff + 6 + i * 12, 12);
-                if (rec == null) break;
-                int platformId = rec.getShort(0) & 0xFFFF;
-                int nameId = rec.getShort(6) & 0xFFFF;
-                int length = rec.getShort(8) & 0xFFFF;
-                int offset = rec.getShort(10) & 0xFFFF;
-                if (nameId != 1) continue;
-                ByteBuffer raw = readAt(fis, nameOff + stringOff + offset, length);
-                if (raw == null) continue;
-                String value;
-                if (platformId == 0 || platformId == 3) {
-                    value = new String(raw.array(), java.nio.charset.StandardCharsets.UTF_16BE);
-                } else {
-                    value = new String(raw.array(), java.nio.charset.StandardCharsets.ISO_8859_1);
-                }
-                value = value.replace("\u0000", "").trim();
-                if (value.isEmpty()) continue;
-                if (platformId == 3) return value;
-                fallback = value;
+            if (platform == 0 || platform == 3) {
+                return new String(buf, off, len, StandardCharsets.UTF_16BE);
             }
-            return fallback;
+            return new String(buf, off, len, StandardCharsets.ISO_8859_1);
         } catch (Exception e) {
             return "";
         }
+    }
+
+    /** 平台/语言偏好：Windows 英文 > Windows 其他 > Unicode > Mac 英文 > 其余。 */
+    private static int rank(int platform, int lang) {
+        if (platform == 3 && lang == 0x409) return 5;
+        if (platform == 3) return 4;
+        if (platform == 0) return 3;
+        if (platform == 1 && lang == 0) return 2;
+        return 1;
+    }
+
+    private static int u16(byte[] b, int i) {
+        return ((b[i] & 0xff) << 8) | (b[i + 1] & 0xff);
+    }
+
+    private static int i32(byte[] b, int i) {
+        return ((b[i] & 0xff) << 24) | ((b[i + 1] & 0xff) << 16)
+                | ((b[i + 2] & 0xff) << 8) | (b[i + 3] & 0xff);
     }
 
     static String md5(File file) {
