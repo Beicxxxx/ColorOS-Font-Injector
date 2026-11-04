@@ -2,10 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
+        android:name=".App"
         android:allowBackup="true"
         android:label="ColorOS 字体注入器"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+        android:theme="@style/Theme.FontInjector">
 
         <activity
             android:name=".MainActivity"
@@ -17,6 +18,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".HistoryActivity"
+            android:exported="false"
+            android:label="历史记录" />
+
         <!-- Shizuku 服务端（shell, uid 2000）通过这个 provider 把 binder 推进本进程；
              缺了它 Shizuku.pingBinder() 永远返回 false。 -->
         <provider
@@ -27,5 +33,6 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
+
 
 </manifest>
