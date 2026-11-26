@@ -1,0 +1,160 @@
+{
+ "base": {
+  "tag": "JP",
+  "path": "fonts/Tazugane StdN Variable.ttf"
+ },
+ "layers": [
+  {
+   "tag": "KR",
+   "path": "fonts/Seol Sans Variable.ttf",
+   "fit": "auto"
+  },
+  {
+   "tag": "TC",
+   "path": "fonts/XiangHe TC VF.ttf",
+   "fit": "auto"
+  },
+  {
+   "tag": "CN",
+   "path": "fonts/BCXiangHeVF.ttf",
+   "fit": "auto"
+  }
+ ],
+ "rules": {
+  "never_from": {
+   "JP": "关复门"
+  },
+  "skip_narrow_han": 0.9,
+  "force": {},
+  "range_order": [
+   {
+    "comment": "希腊、西里尔用比例宽字形（日系源里是 JIS 全角压缩版）",
+    "ranges": [
+     [
+      "0x0370",
+      "0x03FF"
+     ],
+     [
+      "0x0400",
+      "0x052F"
+     ],
+     [
+      "0x1F00",
+      "0x1FFF"
+     ]
+    ],
+    "order": [
+     "KR",
+     "TC",
+     "CN",
+     "JP"
+    ]
+   }
+  ],
+  "remap": {
+   "JP:U+5668": "U+20F96",
+   "JP:U+81ED": "U+26900",
+   "JP:U+7A81": "U+2592E",
+   "JP:U+985E": "U+29516",
+   "JP:U+9038": "U+284DC",
+   "JP:U+7422": "U+24968",
+   "JP:U+6B04": "U+237EC",
+   "JP:U+9686": "U+28E93",
+   "JP:U+5DFD": "U+22049",
+   "JP:U+5C6E": "U+4DB9"
+  },
+  "drop_emoji": {
+   "data": "data/emoji-data-17.0.txt",
+   "keep": "#*0123456789"
+  },
+  "alias": {
+   "U+23377": "U+813C",
+   "U+2866C": "U+9094",
+   "U+27EAF": "U+FA23",
+   "U+23F9E": "U+23F41"
+  }
+ },
+ "quotes": {
+  "chars": "‘’“”"
+ },
+ "encode_map": {
+  "KR:glyph08235": "U+2051",
+  "KR:glyph08280": "U+204E",
+  "KR:glyph08627": "U+229A",
+  "KR:glyph08645": "U+2740",
+  "KR:glyph08646": "U+273F",
+  "KR:glyph08705": "U+2B20",
+  "KR:glyph08706": "U+2B21",
+  "KR:glyph08707": "U+25AD",
+  "KR:glyph08709": "U+23E2",
+  "KR:glyph08716": "U+25FF",
+  "KR:glyph08730": "U+2A38",
+  "KR:glyph08755": "U+29DE",
+  "KR:glyph08766": "U+2047",
+  "KR:glyph08783": "U+2726",
+  "KR:glyph08887": "U+2B04",
+  "KR:glyph08891": "U+27F5",
+  "KR:glyph08990": "U+1F21C",
+  "KR:glyph09088": "U+329F",
+  "KR:glyph09273": "U+1F229",
+  "KR:glyph09274": "U+1F214",
+  "KR:glyph09275": "U+1F22A",
+  "TC:glyph17331": "U+31587",
+  "TC:glyph17305": "U+FAA3",
+  "TC:glyph15889": "U+2578A",
+  "TC:glyph16983": "U+2AE13",
+  "TC:glyph14179": "U+2A731",
+  "TC:glyph15356": "U+2925B",
+  "TC:glyph16467": "U+20627",
+  "TC:glyph17190": "U+31486",
+  "TC:glyph17162": "U+32582",
+  "TC:glyph16378": "U+24A01",
+  "TC:glyph16125": "U+2ECC3",
+  "TC:glyph16231": "U+2BA74",
+  "TC:glyph16695": "U+20985",
+  "TC:glyph17391": "U+297FB",
+  "TC:glyph15085": "U+24FA1",
+  "TC:glyph17326": "U+2F843",
+  "TC:glyph14443": "U+28AAA",
+  "TC:glyph16235": "U+2D69F",
+  "TC:glyph15492": "U+FA81",
+  "TC:glyph17028": "U+FAA0",
+  "TC:glyph16161": "U+31C88",
+  "TC:glyph15824": "U+285CD",
+  "TC:glyph16466": "U+2D0AB",
+  "TC:glyph15969": "U+2AB66",
+  "TC:glyph14450": "U+2851F",
+  "TC:glyph16426": "U+2B8BB",
+  "TC:glyph15477": "U+FA9B",
+  "TC:glyph14295": "U+26D00",
+  "TC:glyph15775": "U+29517",
+  "TC:glyph16388": "U+20666",
+  "TC:glyph17302": "U+20D80",
+  "TC:glyph15035": "U+23DEA",
+  "TC:glyph17244": "U+2E75D",
+  "TC:glyph17284": "U+31480",
+  "TC:glyph14227": "U+213CC",
+  "TC:glyph14204": "U+26191",
+  "TC:glyph17322": "U+2D9AD",
+  "TC:glyph15831": "U+28363",
+  "TC:glyph15941": "U+315CC",
+  "TC:glyph16222": "U+203DD",
+  "TC:glyph15761": "U+2F967",
+  "JP:glyph09405": "U+2F8B0",
+  "TC:glyph14315": "U+2696D",
+  "TC:glyph15133": "U+2F86E"
+ },
+ "transform": null,
+ "names": {
+  "family_en": "BC XiangHe Hei JP VF",
+  "family_zh": "BC翔鹤黑体 日系 VF",
+  "ps_name": "BCXiangHeHeiJPVF",
+  "version": "1.200"
+ },
+ "out": "out/stage1.ttf",
+ "ivs": {
+  "tag": "JP",
+  "table": "data/ivs-adobe-japan1.tsv",
+  "comment": "日系源字形序号=Adobe-Japan1 CID，按 IVD 写入异体字选择器"
+ }
+}
